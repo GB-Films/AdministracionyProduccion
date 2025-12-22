@@ -1,0 +1,33 @@
+:root { --bg:#0b0c10; --panel:#12141b; --muted:#aab; --txt:#eef; --line:#23263a; --accent:#6ea8ff; }
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--txt)}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line);background:rgba(18,20,27,.9);position:sticky;top:0;backdrop-filter:blur(8px)}
+.brand{font-weight:700}
+.layout{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 52px)}
+.sidebar{padding:12px;border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;gap:8px}
+.sidebar a{color:var(--muted);text-decoration:none;padding:10px 10px;border-radius:10px;border:1px solid transparent}
+.sidebar a.active{color:var(--txt);border-color:var(--line);background:#0f1118}
+.content{padding:16px}
+.card{border:1px solid var(--line);background:var(--panel);border-radius:16px;padding:14px;margin-bottom:14px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.btn{border:1px solid var(--line);background:#0f1118;color:var(--txt);padding:9px 12px;border-radius:12px;cursor:pointer}
+.btn.primary{background:var(--accent);border-color:transparent;color:#041022;font-weight:700}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.small{color:var(--muted);font-size:12px}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+input,select,textarea{width:100%;padding:9px 10px;border-radius:12px;border:1px solid var(--line);background:#0f1118;color:var(--txt)}
+textarea{min-height:80px;resize:vertical}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+dialog{border:1px solid var(--line);border-radius:16px;background:var(--panel);color:var(--txt);max-width:720px;width:92%}
+.dialog{padding:14px}
+.dialog-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:10px}
+.kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.kpi .box{border:1px solid var(--line);border-radius:14px;padding:10px;background:#0f1118}
+.kpi .val{font-size:20px;font-weight:800}
+.badge{display:inline-block;padding:4px 8px;border-radius:999px;border:1px solid var(--line);font-size:12px;color:var(--muted)}
+.badge.due{color:#ffd28a}
+.badge.over{color:#ff9b9b}
+.badge.paid{color:#9bffb2}
