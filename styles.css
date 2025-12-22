@@ -148,3 +148,58 @@ dialog{
   justify-content:flex-end;
   gap:8px;
 }
+
+.sidebar{justify-content:space-between}
+.sidebar-top,.sidebar-bottom{display:flex;flex-direction:column;gap:8px}
+
+.calendar-toolbar{
+  display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between
+}
+.cal-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.cal-title{font-weight:900}
+.cal-grid{
+  display:grid;
+  grid-template-columns:repeat(7,1fr);
+  gap:10px;
+  margin-top:10px;
+}
+.cal-dow{
+  color:var(--muted);
+  font-size:12px;
+  text-transform:uppercase;
+  letter-spacing:.4px;
+  padding:0 6px;
+}
+.daycell{
+  border:1px solid var(--line);
+  border-radius:16px;
+  padding:10px;
+  min-height:110px;
+  background:rgba(255,255,255,.03);
+  position:relative;
+}
+.daycell.out{opacity:.45}
+.daynum{
+  position:absolute;top:10px;right:12px;
+  color:var(--muted);
+  font-size:12px;
+}
+.paychip{
+  margin-top:18px;
+  border:1px solid rgba(110,168,255,.25);
+  border-radius:14px;
+  padding:8px 10px;
+  background:rgba(110,168,255,.10);
+  cursor:grab;
+  user-select:none;
+}
+.paychip:hover{transform:translateY(-1px)}
+.paychip .t{font-weight:800;font-size:12px}
+.paychip .s{color:var(--muted);font-size:12px;margin-top:2px}
+.paychip.over{border-color:rgba(255,107,107,.35);background:rgba(255,107,107,.10)}
+.paychip.partial{border-color:rgba(255,210,138,.35);background:rgba(255,210,138,.10)}
+.paychip.paid{border-color:rgba(86,240,138,.25);background:rgba(86,240,138,.08)}
+.dropHint{
+  border-style:dashed;
+  border-color:rgba(110,168,255,.5);
+}
