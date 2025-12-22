@@ -3,20 +3,19 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Admin Producción · 10 días</title>
+  <title>LA CASONA - Admin.</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">Admin Producción</div>
+  <header class="topbar">
+    <div class="brand">LA CASONA <span class="muted">- Admin.</span></div>
 
-  <div class="top-actions">
-    <span id="syncStatus" class="small"></span>
-    <button id="btnSync" class="btn">Sincronizar</button>
-    <button id="btnSave" class="btn primary" title="Forzar guardado">Guardar</button>
-  </div>
-</header>
-
+    <div class="top-actions">
+      <span id="syncStatus" class="small"></span>
+      <button id="btnSync" class="btn">Sincronizar</button>
+      <button id="btnSave" class="btn primary" title="Forzar guardado">Guardar</button>
+    </div>
+  </header>
 
   <div class="layout">
     <nav class="sidebar">
@@ -24,7 +23,9 @@
       <a href="#/budget" data-route="budget">Presupuesto</a>
       <a href="#/expenses" data-route="expenses">Gastos reales</a>
       <a href="#/vendors" data-route="vendors">Proveedores</a>
+      <a href="#/calendar" data-route="calendar">Calendario</a>
       <a href="#/payments" data-route="payments">Pagos</a>
+      <a href="#/balances" data-route="balances">Saldos</a>
       <a href="#/docs" data-route="docs">Comprobantes</a>
       <a href="#/config" data-route="config">Config</a>
     </nav>
@@ -36,7 +37,7 @@
 
   <dialog id="dlg">
     <form method="dialog" class="dialog">
-      <h3 id="dlgTitle">Nuevo</h3>
+      <h3 id="dlgTitle">Editar</h3>
       <div id="dlgBody"></div>
       <div class="dialog-actions">
         <button value="cancel" class="btn">Cancelar</button>
