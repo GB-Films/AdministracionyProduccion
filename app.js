@@ -12,7 +12,7 @@ const DEFAULT_ACCESS_KEY = "$2a$10$nzjX1kWtm5vCMZj8qtlSoeP/kUp77ZWnpFE6kWIcnBqe1
 const AUTO_PULL_INTERVAL_MS = 6000;
 const AUTO_PUSH_DEBOUNCE_MS = 1200;
 const DUE_SOON_DAYS = 4;
-const MAX_INLINE_PDF_BYTES = 350 * 1024;
+const MAX_INLINE_PDF_BYTES = 0; // desactivado para no romper el BIN (413). Usá URL (Drive/Dropbox) si querés adjuntos.
 
 const $ = (sel) => document.querySelector(sel);
 const view = $("#view");
@@ -139,6 +139,109 @@ function ensureMeta(db){
   if(!db._meta.updatedAt) db._meta.updatedAt = "";
   return db;
 }
+
+function ensureTombstones(db){
+  // Tombstones = ids borrados en serio (evita que “revivan” al mergear y evita crecer el BIN con deleted=true)
+  db._tombstones = db._tombstones || {};
+  const t = db._tombstones;
+  t.vendors = t.vendors || {};
+  t.budget = t.budget || {};
+  t.expenses = t.expenses || {};
+  t.paymentLines = t.paymentLines || {};
+  t.documents = t.documents || {};
+  return db;
+}
+function tombHas(db, collection, id){
+  return !!(db?._tombstones?.[collection]?.[id]);
+}
+function addTombstone(db, collection, id){
+  if(!id) return;
+  ensureTombstones(db);
+  // guardamos timestamp solo para debug; la regla es: si está, está borrado.
+  db._tombstones[collection][id] = db._tombstones[collection][id] || nowISO();
+}
+function applyTombstonesToCollection(db, collection){
+  ensureTombstones(db);
+  const tomb = db._tombstones[collection] || {};
+  db[collection] = (db[collection]||[]).filter(r => r && r.id && !tomb[r.id]);
+}
+function applyAllTombstones(db){
+  applyTombstonesToCollection(db, "vendors");
+  applyTombstonesToCollection(db, "budget");
+  applyTombstonesToCollection(db, "expenses");
+  applyTombstonesToCollection(db, "paymentLines");
+  applyTombstonesToCollection(db, "documents");
+}
+function mergeTombstones(A,B){
+  const out = { vendors:{}, budget:{}, expenses:{}, paymentLines:{}, documents:{} };
+  const cols = Object.keys(out);
+  for(const c of cols){
+    Object.assign(out[c], B?.[c]||{});
+    Object.assign(out[c], A?.[c]||{});
+  }
+  return out;
+}
+function dataUrlBytes(s){
+  if(!s) return 0;
+  try{
+    const i = String(s).indexOf(",");
+    if(i === -1) return 0;
+    const b64 = String(s).slice(i+1);
+    return Math.floor((b64.length * 3) / 4);
+  }catch{ return 0; }
+}
+function compactDbForRemote(db){
+  // 1) borra legacy que NO queremos sincronizar
+  delete db.audit;
+  delete db.payments; // legacy
+
+  ensureTombstones(db);
+
+  // 2) promueve deleted=true a tombstone + elimina del array
+  const compactArr = (name)=>{
+    const keep=[];
+    for(const r of (db[name]||[])){
+      if(!r || !r.id) continue;
+      if(r.deleted===true){
+        addTombstone(db, name, r.id);
+        continue;
+      }
+      // 3) corta payloads pesados (base64) para evitar 413
+      if(name==="paymentLines"){
+        if(r.receiptDataUrl){
+          const bytes = dataUrlBytes(r.receiptDataUrl);
+          if(MAX_INLINE_PDF_BYTES===0 || bytes > MAX_INLINE_PDF_BYTES) r.receiptDataUrl = "";
+        }
+      }
+      if(name==="expenses"){
+        if(r.invoiceDataUrl){
+          const bytes = dataUrlBytes(r.invoiceDataUrl);
+          if(MAX_INLINE_PDF_BYTES===0 || bytes > MAX_INLINE_PDF_BYTES) r.invoiceDataUrl = "";
+        }
+      }
+      if(name==="documents"){
+        if(r.dataUrl){
+          const bytes = dataUrlBytes(r.dataUrl);
+          if(MAX_INLINE_PDF_BYTES===0 || bytes > MAX_INLINE_PDF_BYTES) r.dataUrl = "";
+        }
+      }
+      keep.push(r);
+    }
+    db[name]=keep;
+  };
+
+  compactArr("vendors");
+  compactArr("budget");
+  compactArr("expenses");
+  compactArr("paymentLines");
+  compactArr("documents");
+
+  // 4) aplica tombstones (por si venía un remoto “viejo”)
+  applyAllTombstones(db);
+
+  return db;
+}
+
 function bumpMeta(db){
   ensureMeta(db);
   db._meta.revision += 1;
@@ -157,6 +260,7 @@ function normalizeCollection(arr){
 }
 function normalizeDb(db){
   ensureMeta(db);
+  ensureTombstones(db);
 
   db.catalog = db.catalog || {};
   db.catalog.departments = db.catalog.departments || [
@@ -190,31 +294,13 @@ function normalizeDb(db){
   // NUEVO: pagos reales
   db.paymentLines = normalizeCollection(db.paymentLines);
 
-  // MIGRACIÓN desde estructura vieja:
-  // - si existía db.payments con status=paid, lo convertimos a paymentLines
-  //   (no borramos db.payments para no romper nada, solo dejamos de usarlo)
-  if(Array.isArray(db.payments) && db.paymentLines.length === 0){
-    for(const p of normalizeCollection(db.payments)){
-      if(!p || p.deleted) continue;
-      if((p.status||"pending") !== "paid") continue;
-      db.paymentLines.push({
-        id: uid("pl"),
-        updatedAt: nowISO(),
-        deleted: false,
-        expenseId: p.expenseId || "",
-        vendorId: p.vendorId || "",
-        amount: Number(p.amount||0),
-        paidAt: p.paidAt || "",
-        method: p.method || "",
-        receiptUrl: p.receiptUrl || "",
-        receiptDataUrl: p.receiptDataUrl || "",
-        notes: ""
-      });
-    }
-  }
-
   db.documents = normalizeCollection(db.documents);
-  db.audit = Array.isArray(db.audit) ? db.audit : [];
+
+  // aplica tombstones para que no reaparezcan borrados al merge
+  applyAllTombstones(db);
+  // No sincronizamos audit ni estructura legacy
+  if("audit" in db) delete db.audit;
+  if("payments" in db) delete db.payments;
 
   // compat: si expense tenía campos viejos de pago, los dejamos pero el estado lo calculamos desde paymentLines
   return db;
@@ -293,21 +379,27 @@ function mergeCollection(localArr, remoteArr){
 function mergeDb(local, remote){
   const L = normalizeDb(structuredClone(local));
   const R = normalizeDb(structuredClone(remote));
+
   const merged = normalizeDb({
     schemaVersion: Math.max(L.schemaVersion||1, R.schemaVersion||1),
     project: { ...(R.project||{}), ...(L.project||{}) },
     catalog: { ...(R.catalog||{}), ...(L.catalog||{}) },
 
+    _tombstones: mergeTombstones(L._tombstones, R._tombstones),
+
     vendors: mergeCollection(L.vendors, R.vendors),
     budget: mergeCollection(L.budget, R.budget),
     expenses: mergeCollection(L.expenses, R.expenses),
     paymentLines: mergeCollection(L.paymentLines, R.paymentLines),
-    documents: mergeCollection(L.documents, R.documents),
-    payments: mergeCollection(L.payments||[], R.payments||[]), // legacy
-    audit: [...(L.audit||[]), ...(R.audit||[])]
+    documents: mergeCollection(L.documents, R.documents)
   });
+
+  // Los borrados reales (tombstones) siempre ganan: si alguien lo borró, no vuelve.
+  applyAllTombstones(merged);
+
   ensureMeta(merged);
   return merged;
+}
 }
 
 /* ---------------- Autosync ---------------- */
@@ -329,13 +421,24 @@ async function autoPush(){
     setStatus("Guardando…");
     let remote=null; try{ remote = await pullLatest(); }catch{}
     if(remote) state.db = mergeDb(state.db, remote);
+
+    // IMPORTANTÍSIMO: no llenamos el BIN con audit ni payloads pesados.
+    // - deleted=true se convierte en tombstone + se elimina del array
+    // - base64 (PDF/recibos) se descarta si excede el límite (o si está desactivado)
+    state.db = compactDbForRemote(state.db);
+
     bumpMeta(state.db);
-    state.db.audit.unshift({ at: nowISO(), what:"autosave", by:getDeviceId() });
     await pushLatest(state.db);
+
     setDirty(false);
     setStatus("Sincronizado");
   }catch(e){
-    setStatus(`Error: ${String(e.message||e).slice(0,80)}… (guardado local)`);
+    const msg = String(e.message||e);
+    if(msg.toLowerCase().includes("content too large") || msg.includes("413")){
+      setStatus("Error: BIN demasiado grande (413). Se descartaron adjuntos base64; usá URL para comprobantes.");
+    }else{
+      setStatus(`Error: ${msg.slice(0,80)}… (guardado local)`);
+    }
   }finally{
     state.pushing = false;
   }
