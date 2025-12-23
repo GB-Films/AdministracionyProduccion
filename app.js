@@ -400,7 +400,6 @@ function mergeDb(local, remote){
   ensureMeta(merged);
   return merged;
 }
-}
 
 /* ---------------- Autosync ---------------- */
 function setDirty(v){
