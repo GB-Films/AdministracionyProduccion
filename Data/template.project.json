@@ -59,6 +59,7 @@
     "budget": {},
     "expenses": {},
     "paymentLines": {},
-    "documents": {}
+    "documents": {},
+    "costCategories": {}
   }
 }

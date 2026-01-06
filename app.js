@@ -151,6 +151,7 @@ function ensureTombstones(db){
   t.expenses = t.expenses || {};
   t.paymentLines = t.paymentLines || {};
   t.documents = t.documents || {};
+  t.costCategories = t.costCategories || {};
   return db;
 }
 function tombHas(db, collection, id){
@@ -173,9 +174,10 @@ function applyAllTombstones(db){
   applyTombstonesToCollection(db, "expenses");
   applyTombstonesToCollection(db, "paymentLines");
   applyTombstonesToCollection(db, "documents");
+  applyTombstonesToCollection(db, "costCategories");
 }
 function mergeTombstones(A,B){
-  const out = { vendors:{}, budget:{}, expenses:{}, paymentLines:{}, documents:{} };
+  const out = { vendors:{}, budget:{}, expenses:{}, paymentLines:{}, documents:{}, costCategories:{} };
   const cols = Object.keys(out);
   for(const c of cols){
     Object.assign(out[c], B?.[c]||{});
@@ -219,6 +221,7 @@ function compactDbForRemote(db){
   compactArr("expenses");
   compactArr("paymentLines");
   compactArr("documents");
+  compactArr("costCategories");
 
   // 4) aplica tombstones (por si venía un remoto “viejo”)
   applyAllTombstones(db);
@@ -279,6 +282,17 @@ function normalizeDb(db){
   db.paymentLines = normalizeCollection(db.paymentLines);
 
   db.documents = normalizeCollection(db.documents);
+
+  db.costCategories = normalizeCollection(db.costCategories).map(c=>{
+    if(c && typeof c==="object"){
+      if(typeof c.order !== "number") c.order = Number(c.order||0);
+      if(typeof c.collapsedBudget !== "boolean") c.collapsedBudget = !!c.collapsedBudget;
+      if(typeof c.collapsedExpenses !== "boolean") c.collapsedExpenses = !!c.collapsedExpenses;
+      if(typeof c.isDefault !== "boolean") c.isDefault = !!c.isDefault;
+      if(!c.name) c.name = "Categoría";
+    }
+    return c;
+  });
 
   // aplica tombstones para que no reaparezcan borrados al merge
   applyAllTombstones(db);
@@ -375,7 +389,8 @@ function mergeDb(local, remote){
     budget: mergeCollection(L.budget, R.budget),
     expenses: mergeCollection(L.expenses, R.expenses),
     paymentLines: mergeCollection(L.paymentLines, R.paymentLines),
-    documents: mergeCollection(L.documents, R.documents)
+    documents: mergeCollection(L.documents, R.documents),
+    costCategories: mergeCollection(L.costCategories, R.costCategories)
   });
 
   // Los borrados reales (tombstones) siempre ganan: si alguien lo borró, no vuelve.
@@ -664,6 +679,42 @@ function migrateCostCategories(db){
       c.updatedAt = nowISO();
     }
     changed=true;
+  }
+
+
+  // Restauración: si un merge viejo te voló el catálogo pero los ítems siguen con groupId,
+  // recreamos categorías “placeholder” para no perder el orden/agrupado (podés renombrarlas).
+  const referenced = new Set();
+  const collectRefs = (arr)=>{
+    if(!Array.isArray(arr)) return;
+    for(const it of arr){
+      if(!it || typeof it!=="object" || it.deleted===true) continue;
+      if(isCatRow(it)) continue;
+      const gid = (it.groupId||"").trim();
+      if(gid && gid !== DEFAULT_COST_CATEGORY_ID) referenced.add(gid);
+    }
+  };
+  collectRefs(db.budget);
+  collectRefs(db.expenses);
+
+  if(referenced.size){
+    const catsNow2 = visible(db.costCategories);
+    const byId2 = Object.fromEntries(catsNow2.map(c=>[c.id,c]));
+    let max = catsNow2.reduce((m,c)=>Math.max(m, Number(c.order||0)), 0);
+    for(const gid of referenced){
+      if(byId2[gid]) continue;
+      max += 1000;
+      db.costCategories.push({
+        id: gid,
+        name: "Categoría (restaurada)",
+        order: max,
+        collapsedBudget:false,
+        collapsedExpenses:false,
+        updatedAt: nowISO(),
+        deleted:false
+      });
+      changed=true;
+    }
   }
 
   // Normaliza groupId de ítems
@@ -1034,6 +1085,12 @@ function renderDueTable(list){
 
 /* ---------------- Presupuesto (nuevo) ---------------- */
 function renderBudget(){
+  // Reparación rápida: si costCategories se perdió por una versión vieja, lo reconstruimos para que no quede vacío.
+  try{
+    const changed = migrateCostCategories(state.db) || migrateItemOrdering(state.db);
+    if(changed) setDirty(true);
+  }catch(e){ console.warn("migrateCostCategories failed", e); }
+
   const q = (filters.budget || "").trim();
   const vendors = visible(state.db.vendors);
   const vendorsById = Object.fromEntries(vendors.map(v=>[v.id,v]));
@@ -1342,7 +1399,7 @@ function renderBudget(){
     const isEdit=!!rec;
     openDialog(isEdit?"Editar categoría":"Nueva categoría", `
       <div class="grid2">
-        <div><label>Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" placeholder="Ej: Rodaje / Post / Arte…"/></div>
+        <div><label for="d_name">Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" placeholder="Ej: Rodaje / Post / Arte…"/></div>
         <div class="small">Arrastrá la categoría para cambiar su orden.</div>
       </div>
     `, ()=>{
@@ -1380,27 +1437,26 @@ function renderBudget(){
 
     openDialog(isEdit?"Editar ítem":"Nuevo ítem", `
       <div class="grid3">
-        <div><label>Categoría</label><select id="d_group">${groupOpt}</select></div>
-        <div><label>Depto</label><select id="d_department">${deptOpt}</select></div>
-        <div><label>Rubro</label><input id="d_category" value="${escapeHtml(rec?.category||"")}" placeholder="Ej: Cámara"/></div>
+        <div><label for="d_group">Categoría</label><select id="d_group">${groupOpt}</select></div>
+        <div><label for="d_department">Depto</label><select id="d_department">${deptOpt}</select></div>
+        <div><label for="d_category">Rubro</label><input id="d_category" value="${escapeHtml(rec?.category||"")}" placeholder="Ej: Cámara"/></div>
       </div>
 
       <div class="grid3">
-        <div><label>Proveedor (opcional)</label>
-          <select id="d_vendor">
+        <div><label for="d_vendor">Proveedor (opcional)</label><select id="d_vendor">
             <option value="">—</option>${vendorOpt}
           </select>
         </div>
-        <div><label>Tipo unidad</label><input id="d_unitType" value="${escapeHtml(rec?.unitType||"")}" placeholder="Ej: Día / Jornada / Unidad"/></div>
-        <div><label>Unidades</label><input id="d_units" type="number" step="0.01" value="${Number(rec?.units||0)}"/></div>
+        <div><label for="d_unitType">Tipo unidad</label><input id="d_unitType" value="${escapeHtml(rec?.unitType||"")}" placeholder="Ej: Día / Jornada / Unidad"/></div>
+        <div><label for="d_units">Unidades</label><input id="d_units" type="number" step="0.01" value="${Number(rec?.units||0)}"/></div>
       </div>
 
       <div class="grid2">
-        <div><label>$ Unitario</label><input id="d_unitCost" type="number" step="0.01" value="${Number(rec?.unitCost||0)}"/></div>
-        <div><label>Orden</label><input id="d_order" type="number" step="1" value="${Number(rec?.order||0)}" placeholder="(auto)"/></div>
+        <div><label for="d_unitCost">$ Unitario</label><input id="d_unitCost" type="number" step="0.01" value="${Number(rec?.unitCost||0)}"/></div>
+        <div><label for="d_order">Orden</label><input id="d_order" type="number" step="1" value="${Number(rec?.order||0)}" placeholder="(auto)"/></div>
       </div>
 
-      <div><label>Descripción (hover)</label><textarea id="d_description">${escapeHtml(rec?.description||"")}</textarea></div>
+      <div><label for="d_description">Descripción (hover)</label><textarea id="d_description">${escapeHtml(rec?.description||"")}</textarea></div>
     `, ()=>{
       const payload = {
         groupId: $("#d_group").value || DEFAULT_COST_CATEGORY_ID,
@@ -1432,6 +1488,12 @@ function renderBudget(){
 
 /* ---------------- Gastos reales (con parciales) ---------------- */
 function renderExpenses(){
+  // Reparación rápida: si costCategories se perdió por una versión vieja, lo reconstruimos para que no quede vacío.
+  try{
+    const changed = migrateCostCategories(state.db) || migrateItemOrdering(state.db);
+    if(changed) setDirty(true);
+  }catch(e){ console.warn("migrateCostCategories failed", e); }
+
   const q = (filters.expenses || "").trim();
   const vendors = visible(state.db.vendors);
   const vendorsById = Object.fromEntries(vendors.map(v=>[v.id,v]));
@@ -1754,7 +1816,7 @@ function renderExpenses(){
     const isEdit=!!rec;
     openDialog(isEdit?"Editar categoría":"Nueva categoría", `
       <div class="grid2">
-        <div><label>Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" placeholder="Ej: Rodaje / Post / Arte…"/></div>
+        <div><label for="d_name">Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" placeholder="Ej: Rodaje / Post / Arte…"/></div>
         <div class="small">Arrastrá la categoría para cambiar su orden.</div>
       </div>
     `, ()=>{
@@ -1796,25 +1858,25 @@ function renderExpenses(){
 
     openDialog(isEdit?"Editar gasto":"Nuevo gasto", `
       <div class="grid3">
-        <div><label>Categoría</label><select id="d_group">${groupOpt}</select></div>
-        <div><label>Fecha</label><input id="d_date" type="date" value="${escapeHtml(rec?.date||todayISO())}"/></div>
-        <div><label>Proveedor *</label><select id="d_vendor"><option value="">—</option>${vendorOpt}</select></div>
+        <div><label for="d_group">Categoría</label><select id="d_group">${groupOpt}</select></div>
+        <div><label for="d_date">Fecha</label><input id="d_date" type="date" value="${escapeHtml(rec?.date||todayISO())}"/></div>
+        <div><label for="d_vendor">Proveedor *</label><select id="d_vendor"><option value="">—</option>${vendorOpt}</select></div>
       </div>
 
       <div class="grid3">
-        <div><label>Depto</label><select id="d_department">${deptOpt}</select></div>
-        <div><label>Concepto</label><input id="d_concept" value="${escapeHtml(rec?.concept||"")}" /></div>
-        <div><label>Total ($)</label><input id="d_amount" type="number" step="0.01" value="${Number(rec?.amount||0)}"/></div>
+        <div><label for="d_department">Depto</label><select id="d_department">${deptOpt}</select></div>
+        <div><label for="d_concept">Concepto</label><input id="d_concept" value="${escapeHtml(rec?.concept||"")}" /></div>
+        <div><label for="d_amount">Total ($)</label><input id="d_amount" type="number" step="0.01" value="${Number(rec?.amount||0)}"/></div>
       </div>
 
       <div class="grid2">
-        <div><label>Fecha ejecución</label><input id="d_serviceDate" type="date" value="${escapeHtml(rec?.serviceDate||"")}"/></div>
-        <div><label>Vencimiento pago</label><input id="d_dueDate" type="date" value="${escapeHtml(rec?.dueDate||"")}"/></div>
+        <div><label for="d_serviceDate">Fecha ejecución</label><input id="d_serviceDate" type="date" value="${escapeHtml(rec?.serviceDate||"")}"/></div>
+        <div><label for="d_dueDate">Vencimiento pago</label><input id="d_dueDate" type="date" value="${escapeHtml(rec?.dueDate||"")}"/></div>
       </div>
 
-      <div><label>Factura/Comprobante (link)</label><input id="d_invoiceUrl" value="${escapeHtml(rec?.invoiceUrl||"")}" placeholder="https://..."/></div>
+      <div><label for="d_invoiceUrl">Factura/Comprobante (link)</label><input id="d_invoiceUrl" value="${escapeHtml(rec?.invoiceUrl||"")}" placeholder="https://..."/></div>
 
-      <div><label>Notas</label><textarea id="d_notes">${escapeHtml(rec?.notes||"")}</textarea></div>
+      <div><label for="d_notes">Notas</label><textarea id="d_notes">${escapeHtml(rec?.notes||"")}</textarea></div>
 
       ${isEdit ? `
         <div class="card" style="margin-top:10px">
@@ -1909,13 +1971,13 @@ function renderExpenses(){
 
     openDialog("Registrar pago", `
       <div class="grid3">
-        <div><label>Fecha</label><input id="p_date" type="date" value="${todayISO()}"/></div>
-        <div><label>Método</label><select id="p_method">${methodOpt}</select></div>
-        <div><label>Monto ($)</label><input id="p_amount" type="number" step="0.01" value="${Number(remainingForExpense(exp)||0)}"/></div>
+        <div><label for="p_date">Fecha</label><input id="p_date" type="date" value="${todayISO()}"/></div>
+        <div><label for="p_method">Método</label><select id="p_method">${methodOpt}</select></div>
+        <div><label for="p_amount">Monto ($)</label><input id="p_amount" type="number" step="0.01" value="${Number(remainingForExpense(exp)||0)}"/></div>
       </div>
       <div class="grid2">
-        <div><label>Comprobante (link)</label><input id="p_receiptUrl" placeholder="https://..." /></div>
-        <div><label>Notas</label><input id="p_notes" /></div>
+        <div><label for="p_receiptUrl">Comprobante (link)</label><input id="p_receiptUrl" placeholder="https://..." /></div>
+        <div><label for="p_notes">Notas</label><input id="p_notes" /></div>
       </div>
     `, ()=>{
       const amount = Number($("#p_amount").value||0);
@@ -1945,13 +2007,13 @@ function renderExpenses(){
 
     openDialog(isEdit?"Editar pago":"Nuevo pago", `
       <div class="grid3">
-        <div><label>Fecha</label><input id="p_date" type="date" value="${escapeHtml(pl?.paidAt||todayISO())}"/></div>
-        <div><label>Método</label><select id="p_method">${methodOpt}</select></div>
-        <div><label>Monto ($)</label><input id="p_amount" type="number" step="0.01" value="${Number(pl?.amount||0)}"/></div>
+        <div><label for="p_date">Fecha</label><input id="p_date" type="date" value="${escapeHtml(pl?.paidAt||todayISO())}"/></div>
+        <div><label for="p_method">Método</label><select id="p_method">${methodOpt}</select></div>
+        <div><label for="p_amount">Monto ($)</label><input id="p_amount" type="number" step="0.01" value="${Number(pl?.amount||0)}"/></div>
       </div>
       <div class="grid2">
-        <div><label>Comprobante (link)</label><input id="p_receiptUrl" value="${escapeHtml(pl?.receiptUrl||"")}" placeholder="https://..."/></div>
-        <div><label>Notas</label><input id="p_notes" value="${escapeHtml(pl?.notes||"")}" /></div>
+        <div><label for="p_receiptUrl">Comprobante (link)</label><input id="p_receiptUrl" value="${escapeHtml(pl?.receiptUrl||"")}" placeholder="https://..."/></div>
+        <div><label for="p_notes">Notas</label><input id="p_notes" value="${escapeHtml(pl?.notes||"")}" /></div>
       </div>
     `, ()=>{
       const amount = Number($("#p_amount").value||0);
@@ -2053,16 +2115,15 @@ function renderPayments(){
 function openPaymentLineDialog(pl){
   openDialog("Editar pago", `
     <div class="grid3">
-      <div><label>Fecha pago</label><input id="d_paidAt" type="date" value="${escapeHtml(pl.paidAt||todayISO())}"/></div>
-      <div><label>Método</label>
-        <select id="d_method">
+      <div><label for="d_paidAt">Fecha pago</label><input id="d_paidAt" type="date" value="${escapeHtml(pl.paidAt||todayISO())}"/></div>
+      <div><label for="d_method">Método</label><select id="d_method">
           ${["Transferencia","Efectivo","Cheque","Tarjeta","Otro"].map(m=>`<option ${pl.method===m?"selected":""}>${escapeHtml(m)}</option>`).join("")}
         </select>
       </div>
-      <div><label>Monto</label><input id="d_amount" type="number" step="0.01" value="${Number(pl.amount||0)}"/></div>
+      <div><label for="d_amount">Monto</label><input id="d_amount" type="number" step="0.01" value="${Number(pl.amount||0)}"/></div>
     </div>
     <div class="grid2">
-      <div><label>Comprobante (link)</label><input id="d_receiptUrl" value="${escapeHtml(pl.receiptUrl||"")}" placeholder="https://..."/></div>
+      <div><label for="d_receiptUrl">Comprobante (link)</label><input id="d_receiptUrl" value="${escapeHtml(pl.receiptUrl||"")}" placeholder="https://..."/></div>
       <div class="small">PDFs deshabilitados: usá link (Drive/Dropbox/etc.).</div>
     </div>
   `, ()=>{
@@ -2336,13 +2397,13 @@ function renderVendors(){
     const isEdit=!!rec;
     openDialog(isEdit?"Editar proveedor":"Nuevo proveedor", `
       <div class="grid2">
-        <div><label>Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" /></div>
-        <div><label>Contacto</label><input id="d_contact" value="${escapeHtml(rec?.contact||"")}" /></div>
+        <div><label for="d_name">Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" /></div>
+        <div><label for="d_contact">Contacto</label><input id="d_contact" value="${escapeHtml(rec?.contact||"")}" /></div>
       </div>
       <div class="grid3">
-        <div><label>CUIT</label><input id="d_cuit" value="${escapeHtml(rec?.cuit||"")}" /></div>
-        <div><label>Email</label><input id="d_email" value="${escapeHtml(rec?.email||"")}" /></div>
-        <div><label>Tel</label><input id="d_phone" value="${escapeHtml(rec?.phone||"")}" /></div>
+        <div><label for="d_cuit">CUIT</label><input id="d_cuit" value="${escapeHtml(rec?.cuit||"")}" /></div>
+        <div><label for="d_email">Email</label><input id="d_email" value="${escapeHtml(rec?.email||"")}" /></div>
+        <div><label for="d_phone">Tel</label><input id="d_phone" value="${escapeHtml(rec?.phone||"")}" /></div>
       </div>
     `, ()=>{
       const payload = {
@@ -2497,15 +2558,14 @@ function renderDocs(){
     const isEdit=!!rec;
     openDialog(isEdit?"Editar documento":"Nuevo documento", `
       <div class="grid3">
-        <div><label>Fecha</label><input id="d_date" type="date" value="${escapeHtml(rec?.date||todayISO())}"/></div>
-        <div><label>Tipo</label>
-          <select id="d_type">
+        <div><label for="d_date">Fecha</label><input id="d_date" type="date" value="${escapeHtml(rec?.date||todayISO())}"/></div>
+        <div><label for="d_type">Tipo</label><select id="d_type">
             ${["Factura","Recibo","Contrato","Remito","Otro"].map(t=>`<option ${rec?.type===t?"selected":""}>${escapeHtml(t)}</option>`).join("")}
           </select>
         </div>
-        <div><label>URL</label><input id="d_url" value="${escapeHtml(rec?.url||"")}" placeholder="https://..."/></div>
+        <div><label for="d_url">URL</label><input id="d_url" value="${escapeHtml(rec?.url||"")}" placeholder="https://..."/></div>
       </div>
-      <div><label>Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" /></div>
+      <div><label for="d_name">Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" /></div>
     `, ()=>{
       const payload = { date: $("#d_date").value, type: $("#d_type").value, url: $("#d_url").value.trim(), name: $("#d_name").value.trim() };
       if(isEdit){
@@ -2527,12 +2587,12 @@ function renderConfig(){
       <div class="small">BIN precargado. Esto vive en el navegador (no en el bin).</div>
 
       <div class="grid2" style="margin-top:10px">
-        <div><label>BIN_ID</label><input id="c_bin" value="${escapeHtml(state.config.binId||"")}" /></div>
-        <div><label>Access Key</label><input id="c_access" value="${escapeHtml(state.config.accessKey||"")}" /></div>
+        <div><label for="c_bin">BIN_ID</label><input id="c_bin" value="${escapeHtml(state.config.binId||"")}" /></div>
+        <div><label for="c_access">Access Key</label><input id="c_access" value="${escapeHtml(state.config.accessKey||"")}" /></div>
       </div>
 
       <div class="grid2" style="margin-top:10px">
-        <div><label>Master Key (opcional)</label><input id="c_master" value="${escapeHtml(state.config.masterKey||"")}" /></div>
+        <div><label for="c_master">Master Key (opcional)</label><input id="c_master" value="${escapeHtml(state.config.masterKey||"")}" /></div>
         <div class="small">Auto-sync: pull ${AUTO_PULL_INTERVAL_MS/1000}s · push debounce ${AUTO_PUSH_DEBOUNCE_MS/1000}s</div>
       </div>
 
