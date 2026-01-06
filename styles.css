@@ -134,6 +134,91 @@ dialog{
 }
 .kpi .val{font-size:20px;font-weight:900}
 
+/* Dashboard visual */
+.dashHeader{
+  display:flex;
+  gap:14px;
+  flex-wrap:wrap;
+  align-items:center;
+  justify-content:space-between;
+  padding:14px;
+  border:1px solid var(--line);
+  border-radius:18px;
+  background:rgba(255,255,255,.03);
+  box-shadow:var(--shadow);
+}
+.dashTitle{display:flex;gap:12px;align-items:center}
+.dashAvatar{
+  width:44px;height:44px;border-radius:14px;
+  display:flex;align-items:center;justify-content:center;
+  font-weight:900;
+  border:1px solid var(--line);
+  background:linear-gradient(135deg, rgba(59,130,246,.25), rgba(168,85,247,.18));
+}
+.dashActions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
+.dashGrid{
+  margin-top:12px;
+  display:grid;
+  grid-template-columns:repeat(12,1fr);
+  gap:12px;
+}
+.statCard{
+  grid-column:span 3;
+  border-radius:18px;
+  padding:14px;
+  border:1px solid var(--line);
+  box-shadow:var(--shadow);
+  min-height:110px;
+}
+.gradA{background:linear-gradient(135deg, rgba(34,197,94,.18), rgba(59,130,246,.12))}
+.gradB{background:linear-gradient(135deg, rgba(245,158,11,.18), rgba(239,68,68,.10))}
+.gradC{background:linear-gradient(135deg, rgba(168,85,247,.18), rgba(59,130,246,.10))}
+.gradD{background:linear-gradient(135deg, rgba(14,165,233,.18), rgba(34,197,94,.10))}
+.statLabel{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+.statValue{font-size:24px;font-weight:900;margin-top:4px}
+.statHint{font-size:12px;color:var(--muted);margin-top:4px}
+.statRow{display:flex;gap:12px;align-items:center;justify-content:space-between}
+
+.donut{position:relative;width:58px;height:58px;display:flex;align-items:center;justify-content:center}
+.donutSvg{width:58px;height:58px;transform:rotate(-90deg)}
+.donutBg{stroke:rgba(255,255,255,.12)}
+.donutFg{stroke:rgba(34,197,94,.85);stroke-linecap:round}
+.donutText{position:absolute;font-size:12px;font-weight:900}
+
+.span12{grid-column:span 12}
+.span7{grid-column:span 7}
+.span5{grid-column:span 5}
+
+.barList{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+.barRow{display:flex;gap:12px;align-items:center}
+.barLeft{min-width:240px;flex:1}
+.barLabel{font-weight:900}
+.barSmall{font-size:12px;color:var(--muted);margin-top:2px}
+.barTrack{
+  position:relative;
+  height:10px;
+  flex:1;
+  border-radius:999px;
+  border:1px solid var(--line);
+  background:rgba(255,255,255,.02);
+  overflow:hidden;
+}
+.barPlan{position:absolute;left:0;top:0;bottom:0;background:rgba(255,255,255,.16)}
+.barReal{position:absolute;left:0;top:0;bottom:0;background:rgba(59,130,246,.70)}
+
+@media (max-width: 920px){
+  .statCard{grid-column:span 6}
+  .span7{grid-column:span 12}
+  .span5{grid-column:span 12}
+  .barLeft{min-width:180px}
+}
+@media (max-width: 560px){
+  .statCard{grid-column:span 12}
+  .barRow{flex-direction:column;align-items:stretch}
+  .barLeft{min-width:auto}
+}
+
 .toolbar{
   display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between
 }

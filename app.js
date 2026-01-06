@@ -13,6 +13,8 @@ const AUTO_PULL_INTERVAL_MS = 6000;
 const AUTO_PUSH_DEBOUNCE_MS = 1200;
 const DUE_SOON_DAYS = 4;
 // PDFs/adjuntos inline: deshabilitados (solo links).
+// Categorías compartidas (Presupuesto + Gastos reales)
+const DEFAULT_COST_CATEGORY_ID = "cc_default";
 
 const $ = (sel) => document.querySelector(sel);
 const view = $("#view");
@@ -521,6 +523,21 @@ function isCatRow(r){ return !!(r && typeof r==="object" && r.kind==="cat"); }
 function budgetItems(){ return visible(state.db.budget).filter(r=>!isCatRow(r)); }
 function expenseItems(){ return visible(state.db.expenses).filter(r=>!isCatRow(r)); }
 
+function visibleCostCategories(){
+  const db = state.db;
+  if(!db.costCategories) db.costCategories = [];
+  return visible(db.costCategories).sort(sortByOrder);
+}
+function costCatsById(){
+  const cats = visibleCostCategories();
+  return Object.fromEntries(cats.map(c=>[c.id,c]));
+}
+function effCostGroupId(it, catsById){
+  const gid = (it?.groupId||"").trim();
+  if(gid && catsById[gid]) return gid;
+  return DEFAULT_COST_CATEGORY_ID;
+}
+
 function sortByOrder(a,b){
   const ao = Number(a?.order||0);
   const bo = Number(b?.order||0);
@@ -564,76 +581,148 @@ function stripPdfFields(db){
   return changed;
 }
 
-function migrateGroupedOrdering(db){
-  // Agrega campos: kind(cat), groupId, order. Solo si faltan.
+function migrateCostCategories(db){
+  // Unifica categorías entre Presupuesto + Gastos reales.
+  // - Lee categorías legacy (rows kind:"cat") dentro de budget/expenses
+  // - Mantiene un único catálogo: db.costCategories
+  // - Convierte groupId vacío/huérfano a DEFAULT_COST_CATEGORY_ID
   let changed=false;
 
-  const ensure = (arr)=> Array.isArray(arr)?arr:[];
-  const ensureOrderSeq = (recs, step=1000)=>{
-    let i=1;
-    for(const r of recs){
-      r.order = i*step;
-      r.updatedAt = nowISO();
-      i++;
+  if(!Array.isArray(db.costCategories)){
+    db.costCategories = [];
+    changed=true;
+  }
+
+  const upsertFromLegacy = (arr, collapsedField)=>{
+    if(!Array.isArray(arr)) return;
+    for(const r of arr){
+      if(!isCatRow(r) || r.deleted===true) continue;
+      let c = db.costCategories.find(x=>x && x.deleted!==true && x.id===r.id);
+      if(!c){
+        c = {
+          id: r.id,
+          name: r.name || "Categoría",
+          order: Number.isFinite(Number(r.order)) ? Number(r.order) : 0,
+          collapsedBudget: false,
+          collapsedExpenses: false,
+          updatedAt: r.updatedAt || nowISO(),
+          deleted: false
+        };
+        if(typeof r.collapsed==="boolean") c[collapsedField] = !!r.collapsed;
+        db.costCategories.push(c);
+        changed=true;
+      }else{
+        const rt = Date.parse(r.updatedAt||"") || 0;
+        const ct = Date.parse(c.updatedAt||"") || 0;
+        if(rt>ct){
+          if(r.name && r.name!==c.name){ c.name=r.name; changed=true; }
+          if(Number.isFinite(Number(r.order)) && Number(r.order)!==Number(c.order||0)){
+            c.order = Number(r.order);
+            changed=true;
+          }
+          c.updatedAt = r.updatedAt || c.updatedAt;
+        }
+        if(typeof r.collapsed==="boolean" && typeof c[collapsedField]!=="boolean"){
+          c[collapsedField] = !!r.collapsed;
+          changed=true;
+        }
+      }
     }
   };
 
-  const ensureFor = (name)=>{
-    db[name] = ensure(db[name]);
-    const all = db[name];
+  upsertFromLegacy(db.budget, "collapsedBudget");
+  upsertFromLegacy(db.expenses, "collapsedExpenses");
 
-    const cats = all.filter(r=>r && r.deleted!==true && r.kind==="cat");
-    const items = all.filter(r=>r && r.deleted!==true && r.kind!=="cat");
+  // default (editable, no borrable)
+  let def = db.costCategories.find(c=>c && c.deleted!==true && c.id===DEFAULT_COST_CATEGORY_ID);
+  if(!def){
+    const minOrder = visible(db.costCategories).reduce((m,c)=>Math.min(m, Number(c.order||0)), Infinity);
+    db.costCategories.push({
+      id: DEFAULT_COST_CATEGORY_ID,
+      name: "Sin categoría",
+      order: Number.isFinite(minOrder) ? (minOrder-1000) : 0,
+      collapsedBudget: false,
+      collapsedExpenses: false,
+      isDefault: true,
+      updatedAt: nowISO(),
+      deleted: false
+    });
+    changed=true;
+  }else{
+    if(def.isDefault!==true){ def.isDefault=true; changed=true; }
+    if(!def.name){ def.name="Sin categoría"; def.updatedAt=nowISO(); changed=true; }
+  }
 
-    const catsById = Object.fromEntries(cats.map(c=>[c.id,c]));
+  // Si alguna categoría no tiene order, la mandamos al final.
+  const catsNow = visible(db.costCategories);
+  const missingOrder = catsNow.filter(c=>!Number.isFinite(Number(c.order)));
+  if(missingOrder.length){
+    let max = catsNow.reduce((m,c)=>Math.max(m, Number(c.order||0)), 0);
+    for(const c of missingOrder){
+      max += 1000;
+      c.order = max;
+      c.updatedAt = nowISO();
+    }
+    changed=true;
+  }
 
-    // Limpia groupId huérfanos
-    for(const it of items){
-      if(it.groupId && !catsById[it.groupId]){
-        it.groupId = "";
+  // Normaliza groupId de ítems
+  const catsById = Object.fromEntries(visible(db.costCategories).map(c=>[c.id,c]));
+  const fixItems = (arr)=>{
+    if(!Array.isArray(arr)) return;
+    for(const it of arr){
+      if(!it || typeof it!=="object" || it.deleted===true) continue;
+      if(isCatRow(it)) continue;
+      let gid = (it.groupId||"").trim();
+      if(!gid) gid = DEFAULT_COST_CATEGORY_ID;
+      if(!catsById[gid]) gid = DEFAULT_COST_CATEGORY_ID;
+      if(it.groupId !== gid){
+        it.groupId = gid;
         it.updatedAt = nowISO();
         changed=true;
       }
     }
+  };
+  fixItems(db.budget);
+  fixItems(db.expenses);
 
-    // Categorías: order
-    const catsMissingOrder = cats.filter(c=>typeof c.order!=="number");
-    if(catsMissingOrder.length){
-      const sorted = cats.slice()
-        .sort((a,b)=>(a.order??0)-(b.order??0) || (a.updatedAt||"").localeCompare(b.updatedAt||"") || (a.name||"").localeCompare(b.name||""));
-      let i=1;
-      for(const c of sorted){
-        if(typeof c.order!=="number"){
-          c.order = i*1000;
-          c.updatedAt = nowISO();
-          changed=true;
-        }
-        i++;
-      }
-    }
+  return changed;
+}
 
-    // Ítems: order
+function migrateItemOrdering(db){
+  // Asegura order por grupo (usando costCategories). No toca el orden si ya existe.
+  let changed=false;
+  const catsById = Object.fromEntries(visible(db.costCategories||[]).map(c=>[c.id,c]));
+
+  const ensureFor = (name)=>{
+    db[name] = Array.isArray(db[name]) ? db[name] : [];
+    const items = visible(db[name]).filter(r=>!isCatRow(r));
+
+    const eff = (it)=>{
+      const gid = (it.groupId||"").trim();
+      if(gid && catsById[gid]) return gid;
+      return DEFAULT_COST_CATEGORY_ID;
+    };
+
     const byGroup = new Map();
     for(const it of items){
-      const gid = it.groupId || "";
+      const gid = eff(it);
       if(!byGroup.has(gid)) byGroup.set(gid, []);
       byGroup.get(gid).push(it);
     }
 
-    for(const [gid, groupItems] of byGroup.entries()){
-      const missing = groupItems.filter(x=>typeof x.order!=="number");
+    for(const [gid, arr] of byGroup.entries()){
+      const missing = arr.filter(x=>!Number.isFinite(Number(x.order)));
       if(!missing.length) continue;
 
-      // Si el grupo no tiene órdenes: preservamos el orden "viejo" para que no te cambie todo de golpe.
-      const allMissing = groupItems.every(x=>typeof x.order!=="number");
+      const allMissing = arr.every(x=>!Number.isFinite(Number(x.order)));
       if(allMissing){
-        let sorted = groupItems.slice();
+        const sorted = arr.slice();
         if(name==="budget"){
           sorted.sort((a,b)=>(deptIndex(a.department)-deptIndex(b.department)) ||
             (a.category||"").localeCompare(b.category||"") ||
             (a.vendorId||"").localeCompare(b.vendorId||""));
         }else{
-          // expenses: fecha desc
           sorted.sort((a,b)=>(b.date||"").localeCompare(a.date||""));
         }
         let i=1;
@@ -644,7 +733,7 @@ function migrateGroupedOrdering(db){
         }
         changed=true;
       }else{
-        const max = groupItems.reduce((m,x)=>Math.max(m, Number(x.order||0)), 0);
+        const max = arr.reduce((m,x)=>Math.max(m, Number(x.order||0)), 0);
         let cur = max || 0;
         for(const it of missing){
           cur += 1000;
@@ -658,14 +747,14 @@ function migrateGroupedOrdering(db){
 
   ensureFor("budget");
   ensureFor("expenses");
-
   return changed;
 }
 
 function postLoadMigrations(db){
   let changed=false;
   changed = stripPdfFields(db) || changed;
-  changed = migrateGroupedOrdering(db) || changed;
+  changed = migrateCostCategories(db) || changed;
+  changed = migrateItemOrdering(db) || changed;
   return changed;
 }
 
@@ -730,6 +819,29 @@ function renderDashboard(){
   const plannedTotal = budgetItems().reduce((s,b)=>s + (Number(b.units||0)*Number(b.unitCost||0)),0);
   const actualTotal = expenseItems().reduce((s,e)=>s + Number(e.amount||0),0);
   const diff = actualTotal - plannedTotal;
+  const remaining = plannedTotal - actualTotal;
+
+  const catsById = costCatsById();
+  const catsList = visibleCostCategories();
+  const actualByCat = new Map();
+  const plannedByCat = new Map();
+  for(const e of expenseItems()){
+    const gid = effCostGroupId(e, catsById);
+    actualByCat.set(gid, (actualByCat.get(gid)||0) + Number(e.amount||0));
+  }
+  for(const b of budgetItems()){
+    const gid = effCostGroupId(b, catsById);
+    plannedByCat.set(gid, (plannedByCat.get(gid)||0) + (Number(b.units||0)*Number(b.unitCost||0)));
+  }
+  const topCats = catsList
+    .map(c=>({ c, a: actualByCat.get(c.id)||0, p: plannedByCat.get(c.id)||0 }))
+    .filter(x=>x.a>0 || x.p>0)
+    .sort((x,y)=>(y.a-y.p) - (x.a-x.p) || (y.a-x.a) || (y.p-x.p))
+    .slice(0,8);
+  const maxCat = Math.max(1, ...topCats.map(x=>Math.max(x.a,x.p)));
+
+  const spentPct = plannedTotal>0 ? (actualTotal/plannedTotal) : 0;
+  const spentPctClamped = Math.max(0, Math.min(1, spentPct));
 
   const today = todayISO();
   const soonLimit = plusDaysISO(today, DUE_SOON_DAYS);
@@ -755,58 +867,143 @@ function renderDashboard(){
     return { dept, p, a, d:a-p };
   }).filter(Boolean);
 
+  const maxDept = Math.max(1, ...deptRows.map(r=>Math.max(r.p,r.a)));
+  const diffBadge = diff>0 ? "over" : (diff<0 ? "paid" : "");
+  const remBadge = remaining<0 ? "over" : (remaining>0 ? "paid" : "");
+  const dueSum = due.reduce((s,x)=>s + Number(x.rem||0), 0);
+  const dueOver = due.filter(x=>x.e.dueDate < today).length;
+  const projectName = state.db.project?.name || "Proyecto";
+  const projectInitials = (projectName||"P").split(/\s+/).filter(Boolean).slice(0,2).map(s=>s[0].toUpperCase()).join("");
+
   view.innerHTML = `
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
+    <div class="dashHeader">
+      <div class="dashTitle">
+        <div class="dashAvatar">${escapeHtml(projectInitials||"P")}</div>
         <div>
-          <h2>LA CASONA <span class="muted">- Admin.</span></h2>
+          <h2>${escapeHtml(projectName)} <span class="muted">· Admin</span></h2>
           <div class="small">
-            Inicio: ${formatDate(state.db.project?.startDate)} · Días: ${escapeHtml(state.db.project?.numDays||10)} · Moneda: ${escapeHtml(state.db.project?.currency||"ARS")}
+            Inicio: ${formatDate(state.db.project?.startDate)} · Días: ${escapeHtml(state.db.project?.numDays||10)} · Moneda: ${escapeHtml(state.db.project?.currency||"ARS")} · rev ${state.db._meta?.revision||0}
           </div>
         </div>
-        <span class="badge">rev ${state.db._meta?.revision||0}</span>
+      </div>
+      <div class="dashActions">
+        <button class="btn" id="goBudget">Ir a Presupuesto</button>
+        <button class="btn" id="goExpenses">Ir a Gastos</button>
+        <button class="btn" id="goCalendar">Calendario</button>
       </div>
     </div>
 
-    <div class="card">
-      <h3>Resumen</h3>
-      <div class="kpi">
-        <div class="box"><div class="small">Plan</div><div class="val">$ ${money(plannedTotal)}</div></div>
-        <div class="box"><div class="small">Real</div><div class="val">$ ${money(actualTotal)}</div></div>
-        <div class="box"><div class="small">Desvío</div><div class="val">$ ${money(diff)}</div></div>
-        <div class="box"><div class="small">Próx/vencidos (≤${DUE_SOON_DAYS}d)</div><div class="val">${due.length}</div></div>
+    <div class="dashGrid">
+      <div class="statCard gradA">
+        <div class="statRow">
+          <div>
+            <div class="statLabel">Plan</div>
+            <div class="statValue">$ ${money(plannedTotal)}</div>
+            <div class="statHint">Presupuesto total</div>
+          </div>
+          <div class="donut">
+            <svg viewBox="0 0 42 42" class="donutSvg" aria-hidden="true">
+              <circle class="donutBg" cx="21" cy="21" r="15.915" fill="transparent" stroke-width="6" pathLength="100"></circle>
+              <circle class="donutFg" cx="21" cy="21" r="15.915" fill="transparent" stroke-width="6" stroke-dasharray="${(spentPctClamped*100).toFixed(1)} ${Math.max(0,100-(spentPctClamped*100)).toFixed(1)}" stroke-dashoffset="25" pathLength="100"></circle>
+            </svg>
+            <div class="donutText">${plannedTotal>0 ? Math.round(spentPct*100) : 0}%</div>
+          </div>
+        </div>
       </div>
-    </div>
 
-    <div class="card">
-      <h3>Plan vs Real por Depto</h3>
-      ${deptRows.length?`
-        <table>
-          <thead><tr><th>Depto</th><th>Plan</th><th>Real</th><th>Desvío</th></tr></thead>
-          <tbody>
+      <div class="statCard gradB">
+        <div class="statLabel">Real</div>
+        <div class="statValue">$ ${money(actualTotal)}</div>
+        <div class="statHint">Gastos cargados</div>
+      </div>
+
+      <div class="statCard gradC">
+        <div class="statLabel">Desvío</div>
+        <div class="statValue"><span class="badge ${diffBadge}">$ ${money(diff)}</span></div>
+        <div class="statHint">Real − Plan</div>
+      </div>
+
+      <div class="statCard gradD">
+        <div class="statLabel">Por pagar (≤${DUE_SOON_DAYS}d)</div>
+        <div class="statValue">$ ${money(dueSum)}</div>
+        <div class="statHint">${dueOver?`${dueOver} vencidos`:`0 vencidos`} · ${due.length} en total</div>
+      </div>
+
+      <div class="card span7">
+        <div class="row" style="justify-content:space-between;align-items:flex-end">
+          <div>
+            <h3>Plan vs Real por Depto</h3>
+            <div class="small">Barras comparativas rápidas. (Sí, ahora se entiende sin pedir un Excel.)</div>
+          </div>
+          <div class="small">Saldo: <span class="badge ${remBadge}">$ ${money(remaining)}</span></div>
+        </div>
+        ${deptRows.length ? `
+          <div class="barList">
             ${deptRows.map(r=>{
+              const wp = Math.min(100, (r.p/maxDept)*100);
+              const wa = Math.min(100, (r.a/maxDept)*100);
               const badge = r.d>0 ? "over" : (r.d<0 ? "paid" : "");
-              return `<tr>
-                <td>${escapeHtml(r.dept)}</td>
-                <td>$ ${money(r.p)}</td>
-                <td>$ ${money(r.a)}</td>
-                <td><span class="badge ${badge}">$ ${money(r.d)}</span></td>
-              </tr>`;
+              return `
+                <div class="barRow">
+                  <div class="barLeft">
+                    <div class="barLabel">${escapeHtml(r.dept)}</div>
+                    <div class="barSmall">Plan $ ${money(r.p)} · Real $ ${money(r.a)} · <span class="badge ${badge}">$ ${money(r.d)}</span></div>
+                  </div>
+                  <div class="barTrack">
+                    <div class="barPlan" style="width:${wp}%"></div>
+                    <div class="barReal" style="width:${wa}%"></div>
+                  </div>
+                </div>`;
             }).join("")}
-          </tbody>
-        </table>
-      `:`<div class="small">Todavía no hay datos suficientes para el resumen por depto.</div>`}
-    </div>
-
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <h3>Vencen pronto y vencidos</h3>
-        <button class="btn" id="goCalendar">Ver calendario</button>
+          </div>
+        ` : `<div class="small">Todavía no hay datos suficientes para el resumen por depto.</div>`}
       </div>
-      ${renderDueTable(due.slice(0,10))}
+
+      <div class="card span5">
+        <div class="row" style="justify-content:space-between;align-items:flex-end">
+          <div>
+            <h3>Vencen pronto y vencidos</h3>
+            <div class="small">Lo urgente primero. El resto… después de la siesta.</div>
+          </div>
+        </div>
+        ${renderDueTable(due.slice(0,10))}
+      </div>
+
+      <div class="card span12">
+        <div class="row" style="justify-content:space-between;align-items:flex-end">
+          <div>
+            <h3>Top categorías</h3>
+            <div class="small">Plan (barra fina) vs Real (barra gruesa).</div>
+          </div>
+          <div class="small">(Categorías compartidas entre Presupuesto y Gastos)</div>
+        </div>
+        ${topCats.length ? `
+          <div class="barList">
+            ${topCats.map(x=>{
+              const wp = Math.min(100, (x.p/maxCat)*100);
+              const wa = Math.min(100, (x.a/maxCat)*100);
+              const d = x.a - x.p;
+              const badge = d>0 ? "over" : (d<0 ? "paid" : "");
+              return `
+                <div class="barRow">
+                  <div class="barLeft">
+                    <div class="barLabel">${escapeHtml(x.c.name||"Categoría")}</div>
+                    <div class="barSmall">Plan $ ${money(x.p)} · Real $ ${money(x.a)} · <span class="badge ${badge}">$ ${money(d)}</span></div>
+                  </div>
+                  <div class="barTrack">
+                    <div class="barPlan" style="width:${wp}%"></div>
+                    <div class="barReal" style="width:${wa}%"></div>
+                  </div>
+                </div>`;
+            }).join("")}
+          </div>
+        ` : `<div class="small">Sumá ítems al Presupuesto o Gastos reales y esto se prende.</div>`}
+      </div>
     </div>
   `;
   $("#goCalendar").onclick = ()=>location.hash="#/calendar";
+  $("#goBudget").onclick = ()=>location.hash="#/budget";
+  $("#goExpenses").onclick = ()=>location.hash="#/expenses";
 }
 function renderDueTable(list){
   if(!list.length) return `<div class="small">Nada por vencer (o no cargaste vencimientos).</div>`;
@@ -843,11 +1040,11 @@ function renderBudget(){
   const departments = state.db.catalog?.departments || [];
 
   const all = visible(state.db.budget);
-  const catsAll = all.filter(isCatRow).sort(sortByOrder);
   const itemsAll = all.filter(r=>!isCatRow(r));
 
+  const catsAll = visibleCostCategories();
   const catsById = Object.fromEntries(catsAll.map(c=>[c.id,c]));
-  const effGroup = (it)=> (it.groupId && catsById[it.groupId]) ? it.groupId : "";
+  const effGroup = (it)=> effCostGroupId(it, catsById);
 
   // Buscar: si matchea categoría, muestra todo lo de esa categoría.
   let items=[], catIds=new Set();
@@ -913,37 +1110,34 @@ function renderBudget(){
       </tr>`;
   };
 
-  const renderGroupHeader = (gid, title, count, sum, isRealCat)=>{
-    const collapsed = isRealCat ? !!catsById[gid]?.collapsed : false;
+  const renderGroupHeader = (cat, count, sum)=>{
+    const collapsed = !!cat.collapsedBudget;
     const caret = collapsed ? "▶" : "▼";
-    const dropAttr = isRealCat ? `data-drop="budget-cat" data-id="${gid}"` : `data-drop="budget-uncat" data-id="__none__"`;
-    const dragHandle = isRealCat ? `<span class="dragHandle" draggable="${canDnD}" data-drag="budget-cat" data-id="${gid}" title="${canDnD?"Arrastrar categoría":"Desactivado con búsqueda"}">↕</span>` : `<span class="dragHandle mutedHandle" title="Sin categoría">·</span>`;
-    const toggle = isRealCat ? `<button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${gid}">${caret}</button>` : "";
-    const editDel = isRealCat ? `
-      <div class="actions">
-        <button class="iconbtn accent" title="Editar" data-editcat="${gid}">${ICON.edit}</button>
-        <button class="iconbtn danger" title="Borrar" data-delcat="${gid}">${ICON.trash}</button>
-      </div>` : "";
+    const canDelete = !(cat.isDefault===true || cat.id===DEFAULT_COST_CATEGORY_ID);
     return `
-      <tr class="catRow" ${dropAttr}>
-        <td class="dragCell">${dragHandle}</td>
+      <tr class="catRow" data-drop="budget-cat" data-id="${cat.id}">
+        <td class="dragCell">
+          <span class="dragHandle" draggable="${canDnD}" data-drag="budget-cat" data-id="${cat.id}" title="${canDnD?"Arrastrar categoría":"Desactivado con búsqueda"}">↕</span>
+        </td>
         <td colspan="7">
           <div class="catTitle">
-            ${toggle}
+            <button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${cat.id}">${caret}</button>
             <div class="catText">
-              <div class="catName">${escapeHtml(title)}</div>
+              <div class="catName">${escapeHtml(cat.name||"Categoría")}</div>
               <div class="small">${count} ítems · $ ${money(sum)}</div>
             </div>
           </div>
         </td>
-        <td class="actionsCell">${editDel}</td>
+        <td class="actionsCell">
+          <div class="actions">
+            <button class="iconbtn accent" title="Editar" data-editcat="${cat.id}">${ICON.edit}</button>
+            ${canDelete ? `<button class="iconbtn danger" title="Borrar" data-delcat="${cat.id}">${ICON.trash}</button>` : ``}
+          </div>
+        </td>
       </tr>`;
   };
 
   const sumFor = (arr)=>arr.reduce((s,b)=>s + (Number(b.units||0)*Number(b.unitCost||0)),0);
-
-  const uncatItems = itemsByGroup.get("") || [];
-  const showUncat = uncatItems.length>0 || cats.length===0;
 
   view.innerHTML = `
     <div class="card">
@@ -970,14 +1164,11 @@ function renderBudget(){
           </tr>
         </thead>
         <tbody>
-          ${showUncat ? renderGroupHeader("", "Sin categoría", uncatItems.length, sumFor(uncatItems), false) : ""}
-          ${showUncat && uncatItems.length ? uncatItems.map(renderItemRow).join("") : ""}
-
           ${cats.map(c=>{
             const arr = (itemsByGroup.get(c.id) || []);
             const sum = sumFor(arr);
-            const head = renderGroupHeader(c.id, c.name || "Categoría", arr.length, sum, true);
-            if(c.collapsed) return head;
+            const head = renderGroupHeader(c, arr.length, sum);
+            if(c.collapsedBudget) return head;
             return head + arr.map(renderItemRow).join("");
           }).join("")}
         </tbody>
@@ -1011,20 +1202,27 @@ function renderBudget(){
   // Categorías
   view.querySelectorAll("[data-editcat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const rec = state.db.budget.find(x=>x.id===btn.dataset.editcat && x.deleted!==true && isCatRow(x));
+      const rec = state.db.costCategories?.find(x=>x.id===btn.dataset.editcat && x.deleted!==true);
       if(rec) openBudgetCatDialog(rec);
     };
   });
   view.querySelectorAll("[data-delcat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const cat = state.db.budget.find(x=>x.id===btn.dataset.delcat && x.deleted!==true && isCatRow(x));
+      const cat = state.db.costCategories?.find(x=>x.id===btn.dataset.delcat && x.deleted!==true);
       if(!cat) return;
+      if(cat.isDefault===true || cat.id===DEFAULT_COST_CATEGORY_ID) return;
       if(!confirmDelete(`la categoría "${cat.name||"sin nombre"}"`)) return;
 
-      // Los ítems pasan a "Sin categoría"
+      // Los ítems pasan a la categoría default (en ambos: presupuesto + gastos reales)
       for(const it of state.db.budget){
         if(it && it.deleted!==true && !isCatRow(it) && it.groupId===cat.id){
-          it.groupId = "";
+          it.groupId = DEFAULT_COST_CATEGORY_ID;
+          it.updatedAt = nowISO();
+        }
+      }
+      for(const it of state.db.expenses){
+        if(it && it.deleted!==true && !isCatRow(it) && it.groupId===cat.id){
+          it.groupId = DEFAULT_COST_CATEGORY_ID;
           it.updatedAt = nowISO();
         }
       }
@@ -1037,9 +1235,9 @@ function renderBudget(){
   });
   view.querySelectorAll("[data-togglecat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const cat = state.db.budget.find(x=>x.id===btn.dataset.togglecat && x.deleted!==true && isCatRow(x));
+      const cat = state.db.costCategories?.find(x=>x.id===btn.dataset.togglecat && x.deleted!==true);
       if(!cat) return;
-      cat.collapsed = !cat.collapsed;
+      cat.collapsedBudget = !cat.collapsedBudget;
       cat.updatedAt = nowISO();
       setDirty(true);
       route({preserveFocus:false});
@@ -1071,10 +1269,9 @@ function renderBudget(){
           const targetType = row.dataset.drop;
           const targetId = row.dataset.id || "";
           const beforeId = (targetType==="budget-item") ? targetId : "";
-          let destGroupId = "";
+          let destGroupId = DEFAULT_COST_CATEGORY_ID;
 
           if(targetType==="budget-cat") destGroupId = targetId;
-          if(targetType==="budget-uncat") destGroupId = "";
           if(targetType==="budget-item"){
             const tgt = state.db.budget.find(x=>x.id===targetId && x.deleted!==true && !isCatRow(x));
             if(tgt) destGroupId = effGroup(tgt);
@@ -1086,7 +1283,7 @@ function renderBudget(){
         }
 
         if(payload.kind==="budget-cat" && row.dataset.drop==="budget-cat"){
-          reorderBudgetCat(payload.id, row.dataset.id);
+          reorderCostCategory(payload.id, row.dataset.id);
           setDirty(true);
           route({preserveFocus:false});
         }
@@ -1095,8 +1292,8 @@ function renderBudget(){
   }
 
   function groupItems(gid){
-    const catsNow = Object.fromEntries(visible(state.db.budget).filter(isCatRow).map(c=>[c.id,c]));
-    const eff = (it)=> (it.groupId && catsNow[it.groupId]) ? it.groupId : "";
+    const catsNow = costCatsById();
+    const eff = (it)=> effCostGroupId(it, catsNow);
     return visible(state.db.budget)
       .filter(r=>!isCatRow(r) && eff(r)===gid)
       .sort(sortByOrder);
@@ -1106,10 +1303,10 @@ function renderBudget(){
     const it = state.db.budget.find(x=>x.id===itemId && x.deleted!==true && !isCatRow(x));
     if(!it) return;
 
-    const catsNow = Object.fromEntries(visible(state.db.budget).filter(isCatRow).map(c=>[c.id,c]));
-    const eff = (r)=> (r.groupId && catsNow[r.groupId]) ? r.groupId : "";
+    const catsNow = costCatsById();
+    const eff = (r)=> effCostGroupId(r, catsNow);
     const srcGroup = eff(it);
-    const dest = (destGroupId && catsNow[destGroupId]) ? destGroupId : "";
+    const dest = (destGroupId && catsNow[destGroupId]) ? destGroupId : DEFAULT_COST_CATEGORY_ID;
 
     // Reordena origen
     if(srcGroup !== dest){
@@ -1127,9 +1324,9 @@ function renderBudget(){
     renumberOrders(destArr);
   }
 
-  function reorderBudgetCat(movingId, targetId){
+  function reorderCostCategory(movingId, targetId){
     if(movingId===targetId) return;
-    const catsNow = visible(state.db.budget).filter(isCatRow).sort(sortByOrder);
+    const catsNow = visible(state.db.costCategories).sort(sortByOrder);
     const moving = catsNow.find(c=>c.id===movingId);
     const target = catsNow.find(c=>c.id===targetId);
     if(!moving || !target) return;
@@ -1155,13 +1352,14 @@ function renderBudget(){
         rec.name = name;
         rec.updatedAt = nowISO();
       }else{
-        const max = visible(state.db.budget).filter(isCatRow).reduce((m,c)=>Math.max(m, Number(c.order||0)), 0);
-        state.db.budget.push({
-          id: uid("bc"),
-          kind:"cat",
+        state.db.costCategories = Array.isArray(state.db.costCategories) ? state.db.costCategories : [];
+        const max = visible(state.db.costCategories).reduce((m,c)=>Math.max(m, Number(c.order||0)), 0);
+        state.db.costCategories.push({
+          id: uid("cc"),
           name,
           order: (max||0)+1000,
-          collapsed:false,
+          collapsedBudget:false,
+          collapsedExpenses:false,
           updatedAt: nowISO(),
           deleted:false
         });
@@ -1175,8 +1373,10 @@ function renderBudget(){
     const isEdit=!!rec;
     const vendorOpt = vendors.map(v=>`<option value="${v.id}" ${rec?.vendorId===v.id?"selected":""}>${escapeHtml(v.name)}</option>`).join("");
     const deptOpt = departments.map(d=>`<option ${rec?.department===d?"selected":""}>${escapeHtml(d)}</option>`).join("");
-    const catsNow = visible(state.db.budget).filter(isCatRow).sort(sortByOrder);
-    const groupOpt = [`<option value="">Sin categoría</option>`, ...catsNow.map(c=>`<option value="${c.id}" ${rec?.groupId===c.id?"selected":""}>${escapeHtml(c.name||"Categoría")}</option>`)].join("");
+    const catsNow = visibleCostCategories();
+    const catsByIdNow = Object.fromEntries(catsNow.map(c=>[c.id,c]));
+    const currGid = rec ? effCostGroupId(rec, catsByIdNow) : DEFAULT_COST_CATEGORY_ID;
+    const groupOpt = catsNow.map(c=>`<option value="${c.id}" ${currGid===c.id?"selected":""}>${escapeHtml(c.name||"Categoría")}</option>`).join("");
 
     openDialog(isEdit?"Editar ítem":"Nuevo ítem", `
       <div class="grid3">
@@ -1203,7 +1403,7 @@ function renderBudget(){
       <div><label>Descripción (hover)</label><textarea id="d_description">${escapeHtml(rec?.description||"")}</textarea></div>
     `, ()=>{
       const payload = {
-        groupId: $("#d_group").value || "",
+        groupId: $("#d_group").value || DEFAULT_COST_CATEGORY_ID,
         department: $("#d_department").value,
         category: $("#d_category").value.trim(),
         vendorId: $("#d_vendor").value || "",
@@ -1217,9 +1417,10 @@ function renderBudget(){
         Object.assign(rec, payload);
         rec.updatedAt=nowISO();
       }else{
-        const gid = payload.groupId || "";
+        const gid = payload.groupId || DEFAULT_COST_CATEGORY_ID;
+        const catsByIdNow2 = costCatsById();
         const max = visible(state.db.budget)
-          .filter(r=>!isCatRow(r) && (r.groupId||"")===gid)
+          .filter(r=>!isCatRow(r) && effCostGroupId(r, catsByIdNow2)===gid)
           .reduce((m,r)=>Math.max(m, Number(r.order||0)), 0);
         state.db.budget.push({ id: uid("b"), updatedAt: nowISO(), deleted:false, order:(max||0)+1000, ...payload });
       }
@@ -1237,11 +1438,11 @@ function renderExpenses(){
   const departments = state.db.catalog?.departments || [];
 
   const all = visible(state.db.expenses);
-  const catsAll = all.filter(isCatRow).sort(sortByOrder);
   const itemsAll = all.filter(r=>!isCatRow(r));
 
+  const catsAll = visibleCostCategories();
   const catsById = Object.fromEntries(catsAll.map(c=>[c.id,c]));
-  const effGroup = (it)=> (it.groupId && catsById[it.groupId]) ? it.groupId : "";
+  const effGroup = (it)=> effCostGroupId(it, catsById);
 
   // Buscar: si matchea categoría, muestra todo lo de esa categoría.
   let items=[], catIds=new Set();
@@ -1312,37 +1513,34 @@ function renderExpenses(){
       </tr>`;
   };
 
-  const renderGroupHeader = (gid, title, count, sum, isRealCat)=>{
-    const collapsed = isRealCat ? !!catsById[gid]?.collapsed : false;
+  const renderGroupHeader = (cat, count, sum)=>{
+    const collapsed = !!cat.collapsedExpenses;
     const caret = collapsed ? "▶" : "▼";
-    const dropAttr = isRealCat ? `data-drop="exp-cat" data-id="${gid}"` : `data-drop="exp-uncat" data-id="__none__"`;
-    const dragHandle = isRealCat ? `<span class="dragHandle" draggable="${canDnD}" data-drag="exp-cat" data-id="${gid}" title="${canDnD?"Arrastrar categoría":"Desactivado con búsqueda"}">↕</span>` : `<span class="dragHandle mutedHandle" title="Sin categoría">·</span>`;
-    const toggle = isRealCat ? `<button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${gid}">${caret}</button>` : "";
-    const editDel = isRealCat ? `
-      <div class="actions">
-        <button class="iconbtn accent" title="Editar" data-editcat="${gid}">${ICON.edit}</button>
-        <button class="iconbtn danger" title="Borrar" data-delcat="${gid}">${ICON.trash}</button>
-      </div>` : "";
+    const canDelete = !(cat.isDefault===true || cat.id===DEFAULT_COST_CATEGORY_ID);
     return `
-      <tr class="catRow" ${dropAttr}>
-        <td class="dragCell">${dragHandle}</td>
+      <tr class="catRow" data-drop="exp-cat" data-id="${cat.id}">
+        <td class="dragCell">
+          <span class="dragHandle" draggable="${canDnD}" data-drag="exp-cat" data-id="${cat.id}" title="${canDnD?"Arrastrar categoría":"Desactivado con búsqueda"}">↕</span>
+        </td>
         <td colspan="10">
           <div class="catTitle">
-            ${toggle}
+            <button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${cat.id}">${caret}</button>
             <div class="catText">
-              <div class="catName">${escapeHtml(title)}</div>
+              <div class="catName">${escapeHtml(cat.name||"Categoría")}</div>
               <div class="small">${count} gastos · $ ${money(sum)}</div>
             </div>
           </div>
         </td>
-        <td class="actionsCell">${editDel}</td>
+        <td class="actionsCell">
+          <div class="actions">
+            <button class="iconbtn accent" title="Editar" data-editcat="${cat.id}">${ICON.edit}</button>
+            ${canDelete ? `<button class="iconbtn danger" title="Borrar" data-delcat="${cat.id}">${ICON.trash}</button>` : ``}
+          </div>
+        </td>
       </tr>`;
   };
 
   const sumFor = (arr)=>arr.reduce((s,e)=>s + Number(e.amount||0),0);
-
-  const uncatItems = itemsByGroup.get("") || [];
-  const showUncat = uncatItems.length>0 || cats.length===0;
 
   view.innerHTML = `
     <div class="card">
@@ -1370,14 +1568,11 @@ function renderExpenses(){
           </tr>
         </thead>
         <tbody>
-          ${showUncat ? renderGroupHeader("", "Sin categoría", uncatItems.length, sumFor(uncatItems), false) : ""}
-          ${showUncat && uncatItems.length ? uncatItems.map(renderItemRow).join("") : ""}
-
           ${cats.map(c=>{
             const arr = (itemsByGroup.get(c.id) || []);
             const sum = sumFor(arr);
-            const head = renderGroupHeader(c.id, c.name || "Categoría", arr.length, sum, true);
-            if(c.collapsed) return head;
+            const head = renderGroupHeader(c, arr.length, sum);
+            if(c.collapsedExpenses) return head;
             return head + arr.map(renderItemRow).join("");
           }).join("")}
         </tbody>
@@ -1422,19 +1617,26 @@ function renderExpenses(){
   // Categorías
   view.querySelectorAll("[data-editcat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const rec = state.db.expenses.find(x=>x.id===btn.dataset.editcat && x.deleted!==true && isCatRow(x));
+      const rec = state.db.costCategories?.find(x=>x.id===btn.dataset.editcat && x.deleted!==true);
       if(rec) openExpenseCatDialog(rec);
     };
   });
   view.querySelectorAll("[data-delcat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const cat = state.db.expenses.find(x=>x.id===btn.dataset.delcat && x.deleted!==true && isCatRow(x));
+      const cat = state.db.costCategories?.find(x=>x.id===btn.dataset.delcat && x.deleted!==true);
       if(!cat) return;
+      if(cat.isDefault===true || cat.id===DEFAULT_COST_CATEGORY_ID) return;
       if(!confirmDelete(`la categoría "${cat.name||"sin nombre"}"`)) return;
 
+      for(const it of state.db.budget){
+        if(it && it.deleted!==true && !isCatRow(it) && it.groupId===cat.id){
+          it.groupId = DEFAULT_COST_CATEGORY_ID;
+          it.updatedAt = nowISO();
+        }
+      }
       for(const it of state.db.expenses){
         if(it && it.deleted!==true && !isCatRow(it) && it.groupId===cat.id){
-          it.groupId = "";
+          it.groupId = DEFAULT_COST_CATEGORY_ID;
           it.updatedAt = nowISO();
         }
       }
@@ -1447,9 +1649,9 @@ function renderExpenses(){
   });
   view.querySelectorAll("[data-togglecat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const cat = state.db.expenses.find(x=>x.id===btn.dataset.togglecat && x.deleted!==true && isCatRow(x));
+      const cat = state.db.costCategories?.find(x=>x.id===btn.dataset.togglecat && x.deleted!==true);
       if(!cat) return;
-      cat.collapsed = !cat.collapsed;
+      cat.collapsedExpenses = !cat.collapsedExpenses;
       cat.updatedAt = nowISO();
       setDirty(true);
       route({preserveFocus:false});
@@ -1481,10 +1683,9 @@ function renderExpenses(){
           const targetType = row.dataset.drop;
           const targetId = row.dataset.id || "";
           const beforeId = (targetType==="exp-item") ? targetId : "";
-          let destGroupId = "";
+          let destGroupId = DEFAULT_COST_CATEGORY_ID;
 
           if(targetType==="exp-cat") destGroupId = targetId;
-          if(targetType==="exp-uncat") destGroupId = "";
           if(targetType==="exp-item"){
             const tgt = state.db.expenses.find(x=>x.id===targetId && x.deleted!==true && !isCatRow(x));
             if(tgt) destGroupId = effGroup(tgt);
@@ -1496,7 +1697,7 @@ function renderExpenses(){
         }
 
         if(payload.kind==="exp-cat" && row.dataset.drop==="exp-cat"){
-          reorderExpenseCat(payload.id, row.dataset.id);
+          reorderCostCategory(payload.id, row.dataset.id);
           setDirty(true);
           route({preserveFocus:false});
         }
@@ -1505,8 +1706,8 @@ function renderExpenses(){
   }
 
   function groupItems(gid){
-    const catsNow = Object.fromEntries(visible(state.db.expenses).filter(isCatRow).map(c=>[c.id,c]));
-    const eff = (it)=> (it.groupId && catsNow[it.groupId]) ? it.groupId : "";
+    const catsNow = costCatsById();
+    const eff = (it)=> effCostGroupId(it, catsNow);
     return visible(state.db.expenses)
       .filter(r=>!isCatRow(r) && eff(r)===gid)
       .sort(sortByOrder);
@@ -1516,10 +1717,10 @@ function renderExpenses(){
     const it = state.db.expenses.find(x=>x.id===itemId && x.deleted!==true && !isCatRow(x));
     if(!it) return;
 
-    const catsNow = Object.fromEntries(visible(state.db.expenses).filter(isCatRow).map(c=>[c.id,c]));
-    const eff = (r)=> (r.groupId && catsNow[r.groupId]) ? r.groupId : "";
+    const catsNow = costCatsById();
+    const eff = (r)=> effCostGroupId(r, catsNow);
     const srcGroup = eff(it);
-    const dest = (destGroupId && catsNow[destGroupId]) ? destGroupId : "";
+    const dest = (destGroupId && catsNow[destGroupId]) ? destGroupId : DEFAULT_COST_CATEGORY_ID;
 
     if(srcGroup !== dest){
       const src = groupItems(srcGroup).filter(x=>x.id!==it.id);
@@ -1535,9 +1736,9 @@ function renderExpenses(){
     renumberOrders(destArr);
   }
 
-  function reorderExpenseCat(movingId, targetId){
+  function reorderCostCategory(movingId, targetId){
     if(movingId===targetId) return;
-    const catsNow = visible(state.db.expenses).filter(isCatRow).sort(sortByOrder);
+    const catsNow = visible(state.db.costCategories).sort(sortByOrder);
     const moving = catsNow.find(c=>c.id===movingId);
     const target = catsNow.find(c=>c.id===targetId);
     if(!moving || !target) return;
@@ -1563,13 +1764,14 @@ function renderExpenses(){
         rec.name = name;
         rec.updatedAt = nowISO();
       }else{
-        const max = visible(state.db.expenses).filter(isCatRow).reduce((m,c)=>Math.max(m, Number(c.order||0)), 0);
-        state.db.expenses.push({
-          id: uid("ec"),
-          kind:"cat",
+        state.db.costCategories = Array.isArray(state.db.costCategories) ? state.db.costCategories : [];
+        const max = visible(state.db.costCategories).reduce((m,c)=>Math.max(m, Number(c.order||0)), 0);
+        state.db.costCategories.push({
+          id: uid("cc"),
           name,
           order: (max||0)+1000,
-          collapsed:false,
+          collapsedBudget:false,
+          collapsedExpenses:false,
           updatedAt: nowISO(),
           deleted:false
         });
@@ -1583,8 +1785,10 @@ function renderExpenses(){
     const isEdit=!!rec;
     const vendorOpt = vendors.map(v=>`<option value="${v.id}" ${rec?.vendorId===v.id?"selected":""}>${escapeHtml(v.name)}</option>`).join("");
     const deptOpt = departments.map(d=>`<option ${rec?.department===d?"selected":""}>${escapeHtml(d)}</option>`).join("");
-    const catsNow = visible(state.db.expenses).filter(isCatRow).sort(sortByOrder);
-    const groupOpt = [`<option value="">Sin categoría</option>`, ...catsNow.map(c=>`<option value="${c.id}" ${rec?.groupId===c.id?"selected":""}>${escapeHtml(c.name||"Categoría")}</option>`)].join("");
+    const catsNow = visibleCostCategories();
+    const catsByIdNow = Object.fromEntries(catsNow.map(c=>[c.id,c]));
+    const currGid = rec ? effCostGroupId(rec, catsByIdNow) : DEFAULT_COST_CATEGORY_ID;
+    const groupOpt = catsNow.map(c=>`<option value="${c.id}" ${currGid===c.id?"selected":""}>${escapeHtml(c.name||"Categoría")}</option>`).join("");
 
     const existingPays = rec ? paymentLinesForExpense(rec.id) : [];
     const paidSum = rec ? sumPaid(rec.id) : 0;
@@ -1647,7 +1851,7 @@ function renderExpenses(){
       if(!vendorId) throw new Error("En gastos reales el proveedor es obligatorio.");
 
       const payload = {
-        groupId: $("#d_group").value || "",
+        groupId: $("#d_group").value || DEFAULT_COST_CATEGORY_ID,
         date: $("#d_date").value,
         vendorId,
         department: $("#d_department").value,
@@ -1663,9 +1867,10 @@ function renderExpenses(){
         Object.assign(rec, payload);
         rec.updatedAt=nowISO();
       }else{
-        const gid = payload.groupId || "";
+        const gid = payload.groupId || DEFAULT_COST_CATEGORY_ID;
+        const catsByIdNow2 = costCatsById();
         const max = visible(state.db.expenses)
-          .filter(r=>!isCatRow(r) && (r.groupId||"")===gid)
+          .filter(r=>!isCatRow(r) && effCostGroupId(r, catsByIdNow2)===gid)
           .reduce((m,r)=>Math.max(m, Number(r.order||0)), 0);
         state.db.expenses.push({ id: uid("e"), updatedAt: nowISO(), deleted:false, order:(max||0)+1000, ...payload });
       }

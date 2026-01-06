@@ -35,6 +35,18 @@
   "vendors": [],
   "budget": [],
   "expenses": [],
+  "costCategories": [
+    {
+      "id": "cc_default",
+      "name": "Sin categoría",
+      "order": 0,
+      "collapsedBudget": false,
+      "collapsedExpenses": false,
+      "isDefault": true,
+      "updatedAt": "",
+      "deleted": false
+    }
+  ],
   "paymentLines": [],
   "documents": [],
   "_meta": {
