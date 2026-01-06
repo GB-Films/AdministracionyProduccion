@@ -2250,6 +2250,8 @@ function renderExpenses(){
     const isEdit=!!rec;
     const vendorOpt = vendors.map(v=>`<option value="${v.id}" ${rec?.vendorId===v.id?"selected":""}>${escapeHtml(v.name)}</option>`).join("");
     const deptOpt = departments.map(d=>`<option ${rec?.department===d?"selected":""}>${escapeHtml(d)}</option>`).join("");
+    const pmDefault = (rec?.paymentMethod || state.ui.lastExpensePaymentMethod || "Transferencia");
+    const payMethodOpt = ["Efectivo","Transferencia"].map(m=>`<option ${pmDefault===m?"selected":""}>${m}</option>`).join("");
     const catsNow = visibleCostCategories();
     const catsByIdNow = Object.fromEntries(catsNow.map(c=>[c.id,c]));
     const currGid = rec ? effCostGroupId(rec, catsByIdNow) : DEFAULT_COST_CATEGORY_ID;
