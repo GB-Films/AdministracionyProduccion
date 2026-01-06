@@ -105,6 +105,8 @@ th,td{
 th{color:var(--muted);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
 tbody tr:hover{background:rgba(255,255,255,.03)}
 
+.descCell{max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
 input,select,textarea{
   width:100%;padding:9px 10px;border-radius:12px;
   border:1px solid var(--line);
@@ -309,5 +311,3 @@ dialog{
 .catText{display:flex;flex-direction:column;gap:2px}
 .catName{font-weight:900;letter-spacing:.2px}
 .dropHintRow td{outline:2px dashed rgba(110,168,255,.6);outline-offset:-4px}
-
-.descCell{max-width:320px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--txt)}

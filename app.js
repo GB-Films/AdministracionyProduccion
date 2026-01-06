@@ -90,69 +90,6 @@ function escapeHtml(s){ return String(s||"").replaceAll("&","&amp;").replaceAll(
 function plusDaysISO(iso,days){ const d=parseISO(iso); if(!d) return ""; d.setDate(d.getDate()+days); return d.toISOString().slice(0,10); }
 function confirmDelete(label="este ítem"){ return window.confirm(`¿Borrar ${label}? Esta acción no se puede deshacer.`); }
 
-/* -------- Import helpers (Excel) -------- */
-function normKey(s){
-  try{
-    return String(s||"").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
-  }catch{
-    return String(s||"").trim().toLowerCase();
-  }
-}
-function shortText(s, max=56){
-  const t = String(s||"").trim();
-  if(t.length<=max) return t;
-  return t.slice(0, Math.max(0, max-1)) + "…";
-}
-function parseFlexNumber(v){
-  if(v===null || v===undefined || v==="") return 0;
-  if(typeof v==="number") return v;
-  let t = String(v).trim();
-  if(!t) return 0;
-  // limpia moneda / texto raro
-  t = t.replace(/\s+/g,"").replace(/[^0-9,\.\-]/g,"");
-  const lastComma = t.lastIndexOf(",");
-  const lastDot = t.lastIndexOf(".");
-  if(lastComma>-1 && lastDot>-1){
-    if(lastComma>lastDot){
-      t = t.replace(/\./g,"").replace(",",".");
-    }else{
-      t = t.replace(/,/g,"");
-    }
-  }else if(lastComma>-1){
-    t = t.replace(/\./g,"").replace(",",".");
-  }
-  const n = parseFloat(t);
-  return Number.isFinite(n) ? n : 0;
-}
-async function readSpreadsheetRows(file){
-  if(!file) return [];
-  if(!window.XLSX) throw new Error("No encontré la librería XLSX. Probá recargar la página (necesita internet).");
-  const name = String(file.name||"").toLowerCase();
-  if(name.endsWith(".csv")){
-    const text = await file.text();
-    const wb = XLSX.read(text, { type:"string" });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    return XLSX.utils.sheet_to_json(ws, { defval:"" });
-  }else{
-    const ab = await file.arrayBuffer();
-    const wb = XLSX.read(ab, { type:"array" });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    return XLSX.utils.sheet_to_json(ws, { defval:"" });
-  }
-}
-function pickRowField(row, aliases){
-  const keys = Object.keys(row||{});
-  for(const k of keys){
-    const nk = normKey(k);
-    for(const a of aliases){
-      const na = normKey(a);
-      if(nk === na || nk.includes(na)) return row[k];
-    }
-  }
-  return "";
-}
-
-
 const ICON = { trash:"🗑️", edit:"✏️", pay:"💸" };
 
 /* Focus preservation (para buscadores al re-render) */
@@ -611,7 +548,7 @@ function costCatsById(){
   return Object.fromEntries(cats.map(c=>[c.id,c]));
 }
 function effCostGroupId(it, catsById){
-  const gid = (it?.groupId||"").trim();
+  const gid = String(it?.groupId||"").trim();
   if(gid && catsById[gid]) return gid;
   return DEFAULT_COST_CATEGORY_ID;
 }
@@ -671,14 +608,71 @@ function migrateCostCategories(db){
     changed=true;
   }
 
-  const upsertFromLegacy = (arr, collapsedField)=>{
+  
+  // Normaliza ids: algunas categorías viejas venían con id numérico / null / duplicado.
+  // Si el id no es un string usable, la UI no puede editar/borrar porque dataset siempre es string.
+  {
+    const used = new Set();
+    const idMap = new Map(); // oldId(string) -> newId(string)
+    db.costCategories = db.costCategories
+      .filter(c=>c!=null)
+      .map(c=>{
+        if(typeof c === "string"){
+          c = { id: uid("cc"), name: c, order: 0, collapsedBudget:false, collapsedExpenses:false, updatedAt: nowISO(), deleted:false };
+        }
+        if(!c || typeof c !== "object") return null;
+        let old = (c.id==null ? "" : String(c.id)).trim();
+        let id = old;
+
+        // id vacío o duplicado => nuevo id
+        if(!id || used.has(id)){
+          id = uid("cc");
+        }
+
+        // Si cambió el id, guardamos mapping para migrar groupId en ítems
+        if(old && id !== old){
+          idMap.set(old, id);
+        }
+
+        c.id = id;
+        if(typeof c.name !== "string") c.name = (c.name==null ? "" : String(c.name));
+        if(!c.updatedAt) c.updatedAt = c.updatedAt || nowISO();
+        used.add(id);
+        return c;
+      })
+      .filter(Boolean);
+
+    // Migra referencias de ítems si había ids string cambiados (raro, pero mejor cubrir)
+    if(idMap.size){
+      const fixRefs = (arr)=>{
+        if(!Array.isArray(arr)) return;
+        for(const it of arr){
+          if(!it || typeof it!=="object" || it.deleted===true) continue;
+          if(isCatRow(it)) continue;
+          const gidRaw = (it.groupId==null ? "" : String(it.groupId)).trim();
+          if(!gidRaw) continue;
+          const mapped = idMap.get(gidRaw);
+          if(mapped && mapped !== gidRaw){
+            it.groupId = mapped;
+            it.updatedAt = nowISO();
+          }
+        }
+      };
+      fixRefs(db.budget);
+      fixRefs(db.expenses);
+    }
+  }
+
+const upsertFromLegacy = (arr, collapsedField)=>{
     if(!Array.isArray(arr)) return;
     for(const r of arr){
       if(!isCatRow(r) || r.deleted===true) continue;
-      let c = db.costCategories.find(x=>x && x.deleted!==true && x.id===r.id);
+      const rid = (r.id==null ? "" : String(r.id)).trim() || uid("cc");
+      if(r.id !== rid){ r.id = rid; changed=true; }
+      let c = db.costCategories.find(x=>x && x.deleted!==true && x.id===rid);
       if(!c){
         c = {
-          id: r.id,
+          id: rid,
           name: r.name || "Categoría",
           order: Number.isFinite(Number(r.order)) ? Number(r.order) : 0,
           collapsedBudget: false,
@@ -753,7 +747,7 @@ function migrateCostCategories(db){
     for(const it of arr){
       if(!it || typeof it!=="object" || it.deleted===true) continue;
       if(isCatRow(it)) continue;
-      const gid = (it.groupId||"").trim();
+      const gid = String(it.groupId||"").trim();
       if(gid && gid !== DEFAULT_COST_CATEGORY_ID) referenced.add(gid);
     }
   };
@@ -787,7 +781,7 @@ function migrateCostCategories(db){
     for(const it of arr){
       if(!it || typeof it!=="object" || it.deleted===true) continue;
       if(isCatRow(it)) continue;
-      let gid = (it.groupId||"").trim();
+      let gid = String(it.groupId||"").trim();
       if(!gid) gid = DEFAULT_COST_CATEGORY_ID;
       if(!catsById[gid]) gid = DEFAULT_COST_CATEGORY_ID;
       if(it.groupId !== gid){
@@ -813,7 +807,7 @@ function migrateItemOrdering(db){
     const items = visible(db[name]).filter(r=>!isCatRow(r));
 
     const eff = (it)=>{
-      const gid = (it.groupId||"").trim();
+      const gid = String(it.groupId||"").trim();
       if(gid && catsById[gid]) return gid;
       return DEFAULT_COST_CATEGORY_ID;
     };
@@ -1216,7 +1210,7 @@ function renderBudget(){
         <td class="dragCell"><span class="dragHandle" draggable="${canDnD}" data-drag="budget-item" data-id="${b.id}" title="${canDnD?"Arrastrar":"Desactivado con búsqueda"}">↕</span></td>
         <td>${escapeHtml(b.department||"—")}</td>
         <td>${escapeHtml(b.category||"—")}</td>
-        <td class="descCell" title="${tip}">${escapeHtml(shortText(b.description||"")) || "—"}</td>
+        <td class="descCell" title="${tip}">${escapeHtml(b.description||"—")}</td>
         <td>${escapeHtml(vendorName)}</td>
         <td>${escapeHtml(b.unitType||"—")}</td>
         <td>${Number(b.units||0)}</td>
@@ -1268,9 +1262,8 @@ function renderBudget(){
           <div class="small">${canDnD ? "Arrastrá filas para reordenar / mover entre categorías." : "Con búsqueda activa no se puede reordenar (para evitar lío)."}</div>
         </div>
         <div class="row" style="min-width:520px;justify-content:flex-end">
-          ${renderSearch("budget","Buscar depto / rubro / proveedor / categoría…")}
+          ${renderSearch("budget","Buscar depto / rubro / descripción / proveedor / categoría…")}
           <button class="btn" id="btnImport">Importar Excel</button>
-          <input type="file" id="budgetImportFile" accept=".xlsx,.xls,.csv" style="display:none" />
           <button class="btn" id="btnAddCat">+ Categoría</button>
           <button class="btn" id="btnAdd">+ Ítem</button>
         </div>
@@ -1301,181 +1294,11 @@ function renderBudget(){
   `;
 
   attachSearch("budget");
-  // Importar Excel
-  const fileInput = $("#budgetImportFile");
-  const btnImport = $("#btnImport");
-  if(btnImport && fileInput){
-    btnImport.onclick = ()=>fileInput.click();
-    fileInput.onchange = async ()=>{
-      const file = fileInput.files?.[0];
-      fileInput.value = "";
-      if(!file) return;
-      try{
-        const rows = await readSpreadsheetRows(file);
-        if(!rows.length) throw new Error("El archivo está vacío.");
-        const keys0 = Object.keys(rows[0]||{});
-        if(keys0.some(k=>String(k||"").startsWith("__EMPTY"))){
-          throw new Error("El Excel necesita encabezados (fila 1). Ej: Categoria, Depto, Rubro, Proveedor, Tipo unidad, Unidades, Unitario, Descripción.");
-        }
-
-        const parsed = [];
-        for(const r of rows){
-          const groupName = String(pickRowField(r, ["Categoría","Categoria","Grupo","Category","Group"])||"").trim();
-          const department = String(pickRowField(r, ["Depto","Departamento","Dept","Department"])||"").trim();
-          const rubro = String(pickRowField(r, ["Rubro","Item","Concepto","Concept","Servicio"])||"").trim();
-          const vendorName = String(pickRowField(r, ["Proveedor","Vendor","Proveedor/Empresa","Empresa"])||"").trim();
-          const unitType = String(pickRowField(r, ["Tipo unidad","Tipo","Unidad","Unit type","Unit"])||"").trim();
-          const unitsRaw = pickRowField(r, ["Unidades","Cantidad","Qty","Units"]);
-          const unitCostRaw = pickRowField(r, ["Unitario","Costo unitario","Precio unitario","$ Unitario","Unit cost","Unit price","Precio"]);
-          const description = String(pickRowField(r, ["Descripción","Descripcion","Detalle","Notas","Nota","Description"])||"").trim();
-
-          const units = parseFlexNumber(unitsRaw);
-          const unitCost = parseFlexNumber(unitCostRaw);
-
-          const hasAny = groupName || department || rubro || vendorName || unitType || description || units || unitCost;
-          if(!hasAny) continue;
-
-          parsed.push({
-            groupName,
-            department: department || "Otros",
-            category: rubro,
-            vendorName,
-            unitType,
-            units,
-            unitCost,
-            description
-          });
-        }
-
-        if(!parsed.length) throw new Error("No encontré filas importables (¿encabezados correctos?).");
-
-        // Pre-cálculo de altas
-        const catsNow = visibleCostCategories();
-        const catNameToId = new Map(catsNow.map(c=>[normKey(c.name), c.id]));
-        catNameToId.set(normKey("default"), DEFAULT_COST_CATEGORY_ID);
-
-        const newCats = new Map(); // normName -> display
-        for(const p of parsed){
-          const n = normKey(p.groupName);
-          if(!n || n===normKey("default")) continue;
-          if(!catNameToId.has(n)) newCats.set(n, p.groupName);
-        }
-
-        const vendorsNow = visible(state.db.vendors);
-        const vendorNameToId = new Map(vendorsNow.map(v=>[normKey(v.name), v.id]));
-        const newVendors = new Map();
-        for(const p of parsed){
-          const n = normKey(p.vendorName);
-          if(!n) continue;
-          if(!vendorNameToId.has(n)) newVendors.set(n, p.vendorName);
-        }
-
-        const sample = parsed.slice(0,6).map(p=>`
-          <tr>
-            <td>${escapeHtml(p.groupName||"(Default)")}</td>
-            <td>${escapeHtml(p.department||"")}</td>
-            <td>${escapeHtml(p.category||"")}</td>
-            <td>${escapeHtml(p.vendorName||"")}</td>
-            <td>$ ${money(p.units*p.unitCost)}</td>
-          </tr>
-        `).join("");
-
-        openDialog("Importar Excel (Presupuesto)", `
-          <div class="small">
-            Archivo: <b>${escapeHtml(file.name)}</b><br/>
-            Filas importables: <b>${parsed.length}</b><br/>
-            Nuevas categorías: <b>${newCats.size}</b> · Nuevos proveedores: <b>${newVendors.size}</b>
-          </div>
-
-          <div style="height:10px"></div>
-
-          <div class="card" style="margin:0">
-            <div class="small" style="margin-bottom:8px">Muestra (primeras ${Math.min(6,parsed.length)} filas)</div>
-            <table>
-              <thead><tr><th>Categoría</th><th>Depto</th><th>Rubro</th><th>Proveedor</th><th>Total</th></tr></thead>
-              <tbody>${sample}</tbody>
-            </table>
-          </div>
-
-          <div style="height:10px"></div>
-          <div class="small">Importa como <b>nuevos ítems</b> (no reemplaza existentes).</div>
-        `, ()=>{
-          // 1) Crear categorías faltantes
-          let maxCatOrder = Math.max(0, ...catsNow.map(c=>Number(c.order||0)));
-          for(const [n, display] of newCats.entries()){
-            maxCatOrder += 1000;
-            const id = uid("cc");
-            state.db.costCategories.push({
-              id,
-              name: display || "Categoría",
-              order: maxCatOrder,
-              isDefault:false,
-              collapsedBudget:false,
-              collapsedExpenses:false,
-              updatedAt: nowISO(),
-              deleted:false
-            });
-            catNameToId.set(n, id);
-          }
-
-          // 2) Crear proveedores faltantes
-          for(const [n, display] of newVendors.entries()){
-            const id = uid("v");
-            state.db.vendors.push({ id, name: display, updatedAt: nowISO(), deleted:false });
-            vendorNameToId.set(n, id);
-          }
-
-          // 3) Insertar ítems con order al final por grupo
-          const catsById = costCatsById();
-          const eff = (it)=> effCostGroupId(it, catsById);
-          const maxOrderByGroup = {};
-          for(const it of visible(state.db.budget)){
-            if(isCatRow(it)) continue;
-            const gid = eff(it);
-            maxOrderByGroup[gid] = Math.max(Number(maxOrderByGroup[gid]||0), Number(it.order||0));
-          }
-
-          for(const p of parsed){
-            const gNorm = normKey(p.groupName);
-            let groupId = DEFAULT_COST_CATEGORY_ID;
-            if(gNorm && catNameToId.has(gNorm)) groupId = catNameToId.get(gNorm);
-            const vNorm = normKey(p.vendorName);
-            const vendorId = vNorm ? (vendorNameToId.get(vNorm) || "") : "";
-
-            const gidEff = (groupId && catsById[groupId]) ? groupId : DEFAULT_COST_CATEGORY_ID;
-            const next = (maxOrderByGroup[gidEff]||0) + 1000;
-            maxOrderByGroup[gidEff] = next;
-
-            state.db.budget.push({
-              id: uid("b"),
-              updatedAt: nowISO(),
-              deleted:false,
-              groupId: gidEff,
-              order: next,
-              department: p.department || "Otros",
-              category: p.category || "",
-              vendorId,
-              unitType: p.unitType || "",
-              units: Number(p.units||0),
-              unitCost: Number(p.unitCost||0),
-              description: p.description || ""
-            });
-          }
-
-          setDirty(true);
-          route({preserveFocus:false});
-        });
-
-      }catch(e){
-        alert(e.message || e);
-      }
-    };
-  }
-
-
 
   $("#btnAdd").onclick = ()=>openBudgetItemDialog(null);
   $("#btnAddCat").onclick = ()=>openBudgetCatDialog(null);
+  const btnImp = $("#btnImport");
+  if(btnImp) btnImp.onclick = ()=>startBudgetImport();
 
   // Ítems
   view.querySelectorAll("[data-del]").forEach(btn=>{
@@ -1664,7 +1487,264 @@ function renderBudget(){
     });
   }
 
-  function openBudgetItemDialog(rec){
+  
+/* ---------------- Import Excel (Presupuesto) ---------------- */
+let _xlsxPromise = null;
+function ensureXlsxLoaded(){
+  if(window.XLSX) return Promise.resolve();
+  if(_xlsxPromise) return _xlsxPromise;
+  _xlsxPromise = new Promise((resolve,reject)=>{
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
+    s.referrerPolicy = "no-referrer";
+    s.onload = ()=>resolve();
+    s.onerror = ()=>reject(new Error("No se pudo cargar la librería XLSX (¿sin internet?)."));
+    document.head.appendChild(s);
+  });
+  return _xlsxPromise;
+}
+
+function normHeader(h){
+  return String(h||"")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g,"")
+    .replace(/[^a-z0-9]+/g," ")
+    .trim();
+}
+
+function parseNumEs(v){
+  if(typeof v === "number" && Number.isFinite(v)) return v;
+  let s = String(v||"").trim();
+  if(!s) return 0;
+  s = s.replace(/[^\d,.\-]/g,"");
+  if(s.includes(",") && s.includes(".")){
+    // 1.234,56 -> 1234.56
+    s = s.replace(/\./g,"").replace(",",".");
+  }else if(s.includes(",") && !s.includes(".")){
+    s = s.replace(",",".");
+  }
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function splitCsvLine(line, sep){
+  const out = [];
+  let cur = "";
+  let inQ = false;
+  for(let i=0;i<line.length;i++){
+    const ch = line[i];
+    if(ch === '"'){
+      const next = line[i+1];
+      if(inQ && next === '"'){ cur += '"'; i++; continue; } // ""
+      inQ = !inQ;
+      continue;
+    }
+    if(ch === sep && !inQ){
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map(s=>String(s||"").trim());
+}
+function parseCSV(text){
+  const lines = String(text||"")
+    .replace(/\r\n/g,"\n")
+    .replace(/\r/g,"\n")
+    .split("\n")
+    .filter(l=>l.trim()!=="");
+  if(!lines.length) return [];
+  const h = lines[0];
+  const seps = [";",",","\t"];
+  let sep = ",";
+  let best = -1;
+  for(const s of seps){
+    const c = h.split(s).length;
+    if(c>best){ best=c; sep=s; }
+  }
+  return lines.map(l=>splitCsvLine(l, sep));
+}
+
+function findOrCreateVendorByName(name){
+  name = String(name||"").trim();
+  if(!name) return "";
+  const nkey = name.toLowerCase();
+  const v = (state.db.vendors||[]).find(x=>x && x.deleted!==true && String(x.name||"").trim().toLowerCase()===nkey);
+  if(v) return v.id;
+  const rec = { id: uid("v"), name, contact:"", cuit:"", email:"", phone:"", updatedAt: nowISO(), deleted:false };
+  state.db.vendors.push(rec);
+  return rec.id;
+}
+
+function findOrCreateCostCategoryByName(name){
+  name = String(name||"").trim();
+  if(!name) return DEFAULT_COST_CATEGORY_ID;
+  migrateCostCategories(state.db); // asegura catálogo y default
+  const nkey = name.toLowerCase();
+  let c = (state.db.costCategories||[]).find(x=>x && x.deleted!==true && String(x.name||"").trim().toLowerCase()===nkey);
+  if(c) return c.id;
+
+  const max = visible(state.db.costCategories).reduce((m,x)=>Math.max(m, Number(x.order||0)), 0);
+  const rec = {
+    id: uid("cc"),
+    name,
+    order: max + 1000,
+    collapsedBudget:false,
+    collapsedExpenses:false,
+    updatedAt: nowISO(),
+    deleted:false
+  };
+  state.db.costCategories.push(rec);
+  return rec.id;
+}
+
+async function startBudgetImport(){
+  try{
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".xlsx,.xls,.csv";
+    input.onchange = async ()=>{
+      const file = input.files && input.files[0];
+      if(!file) return;
+
+      let rows = [];
+      const ext = (file.name.split(".").pop()||"").toLowerCase();
+
+      if(ext === "csv"){
+        const text = await file.text();
+        rows = parseCSV(text);
+      }else{
+        await ensureXlsxLoaded();
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type:"array" });
+        const sheetName = wb.SheetNames?.[0];
+        if(!sheetName) throw new Error("El Excel no tiene hojas.");
+        const sheet = wb.Sheets[sheetName];
+        rows = XLSX.utils.sheet_to_json(sheet, { header:1, raw:false, defval:"" });
+      }
+
+      const imported = importBudgetRows(rows);
+      setDirty(true);
+      route({ preserveFocus:false });
+      alert(`Importación OK: ${imported.items} ítems, ${imported.cats} categorías nuevas, ${imported.vendors} proveedores nuevos.`);
+    };
+    input.click();
+  }catch(e){
+    alert(`No se pudo importar. ${e?.message || e}`);
+  }
+}
+
+function importBudgetRows(rows){
+  if(!Array.isArray(rows) || rows.length < 2) throw new Error("No hay datos.");
+  const header = rows[0].map(normHeader);
+
+  const pick = (aliases)=>{
+    for(let i=0;i<header.length;i++){
+      const h = header[i];
+      if(!h) continue;
+      for(const a of aliases){
+        if(h === a || h.includes(a)) return i;
+      }
+    }
+    return -1;
+  };
+
+  const idxGroup = pick(["categoria","grupo","seccion","section","area"]);
+  const idxDept  = pick(["depto","departamento","department"]);
+  const idxRubro = pick(["rubro","concepto","item"]);
+  const idxVend  = pick(["proveedor","vendor"]);
+  const idxUnitT = pick(["tipo unidad","tipo","unidad","unit type"]);
+  const idxUnits = pick(["unidades","cantidad","cant","qty","units"]);
+  const idxUnitC = pick(["unitario","costo unitario","precio unitario","unit cost","costo"]);
+  const idxDesc  = pick(["descripcion","detalle","observaciones","nota","notes","desc"]);
+
+  // Precalcula orden
+  const items = budgetItems();
+  let maxOrder = items.reduce((m,it)=>Math.max(m, Number(it.order||0)), 0);
+
+  let newCats=0, newVendors=0, newItems=0;
+
+  // caches
+  const vendByName = new Map((visible(state.db.vendors)||[]).map(v=>[String(v.name||"").trim().toLowerCase(), v.id]));
+  const catByName = new Map(visibleCostCategories().map(c=>[String(c.name||"").trim().toLowerCase(), c.id]));
+
+  const getVendorId = (name)=>{
+    name = String(name||"").trim();
+    if(!name) return "";
+    const k = name.toLowerCase();
+    const existing = vendByName.get(k);
+    if(existing) return existing;
+    const id = findOrCreateVendorByName(name);
+    vendByName.set(k, id);
+    newVendors++;
+    return id;
+  };
+
+  const getCatId = (name)=>{
+    name = String(name||"").trim();
+    if(!name) return DEFAULT_COST_CATEGORY_ID;
+    const k = name.toLowerCase();
+    const existing = catByName.get(k);
+    if(existing) return existing;
+    const id = findOrCreateCostCategoryByName(name);
+    catByName.set(k, id);
+    newCats++;
+    return id;
+  };
+
+  for(let r=1;r<rows.length;r++){
+    const row = rows[r] || [];
+    const groupName = idxGroup>=0 ? row[idxGroup] : "";
+    const dept = idxDept>=0 ? row[idxDept] : "";
+    const rubro = idxRubro>=0 ? row[idxRubro] : "";
+    const vendName = idxVend>=0 ? row[idxVend] : "";
+    const unitType = idxUnitT>=0 ? row[idxUnitT] : "";
+    const units = idxUnits>=0 ? parseNumEs(row[idxUnits]) : 0;
+    const unitCost = idxUnitC>=0 ? parseNumEs(row[idxUnitC]) : 0;
+    const desc = idxDesc>=0 ? row[idxDesc] : "";
+
+    const allEmpty = !String(groupName||"").trim()
+      && !String(dept||"").trim()
+      && !String(rubro||"").trim()
+      && !String(vendName||"").trim()
+      && !String(unitType||"").trim()
+      && !String(desc||"").trim()
+      && !(units||0)
+      && !(unitCost||0);
+
+    if(allEmpty) continue;
+
+    const groupId = getCatId(groupName);
+    const vendorId = getVendorId(vendName);
+
+    maxOrder += 1000;
+
+    state.db.budget.push({
+      id: uid("b"),
+      groupId,
+      department: String(dept||"").trim(),
+      category: String(rubro||"").trim(),
+      vendorId,
+      unitType: String(unitType||"").trim(),
+      units: Number(units||0),
+      unitCost: Number(unitCost||0),
+      description: String(desc||"").trim(),
+      order: maxOrder,
+      updatedAt: nowISO(),
+      deleted:false
+    });
+    newItems++;
+  }
+
+  return { items:newItems, cats:newCats, vendors:newVendors };
+}
+
+
+function openBudgetItemDialog(rec){
     const isEdit=!!rec;
     const vendorOpt = vendors.map(v=>`<option value="${v.id}" ${rec?.vendorId===v.id?"selected":""}>${escapeHtml(v.name)}</option>`).join("");
     const deptOpt = departments.map(d=>`<option ${rec?.department===d?"selected":""}>${escapeHtml(d)}</option>`).join("");
@@ -1694,7 +1774,7 @@ function renderBudget(){
         <div><label for="d_order">Orden</label><input id="d_order" type="number" step="1" value="${Number(rec?.order||0)}" placeholder="(auto)"/></div>
       </div>
 
-      <div><label for="d_description">Descripción</label><textarea id="d_description">${escapeHtml(rec?.description||"")}</textarea></div>
+      <div><label for="d_description">Descripción (hover)</label><textarea id="d_description">${escapeHtml(rec?.description||"")}</textarea></div>
     `, ()=>{
       const payload = {
         groupId: $("#d_group").value || DEFAULT_COST_CATEGORY_ID,
