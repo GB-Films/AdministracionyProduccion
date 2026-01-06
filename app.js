@@ -12,8 +12,7 @@ const DEFAULT_ACCESS_KEY = "$2a$10$nzjX1kWtm5vCMZj8qtlSoeP/kUp77ZWnpFE6kWIcnBqe1
 const AUTO_PULL_INTERVAL_MS = 6000;
 const AUTO_PUSH_DEBOUNCE_MS = 1200;
 const DUE_SOON_DAYS = 4;
-const MAX_INLINE_PDF_BYTES = 0; // 0 = adjuntos inline desactivados (evita 413). Usá URL (Drive/Dropbox).
-const INLINE_ATTACHMENTS_ENABLED = MAX_INLINE_PDF_BYTES > 0;
+// PDFs/adjuntos inline: deshabilitados (solo links).
 
 const $ = (sel) => document.querySelector(sel);
 const view = $("#view");
@@ -24,7 +23,6 @@ const dlgOk = $("#dlgOk");
 
 const LS_KEY = "lacasona_admin_config_v2";
 const LS_DEVICE = "lacasona_admin_deviceId_v1";
-const LS_DB = "lacasona_admin_db_v2";
 
 const filters = {
   budget:"", expenses:"", vendors:"", calendar:"", payments:"", balances:"", docs:""
@@ -72,13 +70,6 @@ function isFormField(el){
 
 /* ---------------- Basic helpers ---------------- */
 function setStatus(s){ const el=$("#syncStatus"); if(el) el.textContent = s||""; }
-function updateBrand(){
-  const name = state.db?.project?.name || "LA CASONA";
-  const el = $("#brandTitle");
-  if(el) el.textContent = name;
-  document.title = `${name} - Admin.`;
-}
-
 function uid(prefix="id"){ return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,7)}`; }
 function nowISO(){ return new Date().toISOString(); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
@@ -139,13 +130,6 @@ function saveConfig(cfg){
   state.config = cfg;
 }
 
-function saveLocalDb(db){
-  try{ localStorage.setItem(LS_DB, JSON.stringify(db)); }catch{}
-}
-function loadLocalDb(){
-  try{ return JSON.parse(localStorage.getItem(LS_DB) || "null"); }catch{ return null; }
-}
-
 /* ---------------- DB normalize + MIGRACIÓN ---------------- */
 function tstamp(s){ return s ? (Date.parse(s) || 0) : 0; }
 function ensureMeta(db){
@@ -197,15 +181,6 @@ function mergeTombstones(A,B){
   }
   return out;
 }
-function dataUrlBytes(s){
-  if(!s) return 0;
-  try{
-    const i = String(s).indexOf(",");
-    if(i === -1) return 0;
-    const b64 = String(s).slice(i+1);
-    return Math.floor((b64.length * 3) / 4);
-  }catch{ return 0; }
-}
 function compactDbForRemote(db){
   // 1) borra legacy que NO queremos sincronizar
   delete db.audit;
@@ -222,24 +197,15 @@ function compactDbForRemote(db){
         addTombstone(db, name, r.id);
         continue;
       }
-      // 3) corta payloads pesados (base64) para evitar 413
+      // 3) PDFs/adjuntos inline: siempre fuera (solo links)
       if(name==="paymentLines"){
-        if(r.receiptDataUrl){
-          const bytes = dataUrlBytes(r.receiptDataUrl);
-          if(MAX_INLINE_PDF_BYTES===0 || bytes > MAX_INLINE_PDF_BYTES) r.receiptDataUrl = "";
-        }
+        if("receiptDataUrl" in r) delete r.receiptDataUrl;
       }
       if(name==="expenses"){
-        if(r.invoiceDataUrl){
-          const bytes = dataUrlBytes(r.invoiceDataUrl);
-          if(MAX_INLINE_PDF_BYTES===0 || bytes > MAX_INLINE_PDF_BYTES) r.invoiceDataUrl = "";
-        }
+        if("invoiceDataUrl" in r) delete r.invoiceDataUrl;
       }
       if(name==="documents"){
-        if(r.dataUrl){
-          const bytes = dataUrlBytes(r.dataUrl);
-          if(MAX_INLINE_PDF_BYTES===0 || bytes > MAX_INLINE_PDF_BYTES) r.dataUrl = "";
-        }
+        if("dataUrl" in r) delete r.dataUrl;
       }
       keep.push(r);
     }
@@ -429,9 +395,8 @@ function scheduleAutoPush(){
   state.pushTimer = setTimeout(()=>autoPush().catch(()=>{}), AUTO_PUSH_DEBOUNCE_MS);
   setStatus("Cambios…");
 }
-async function autoPush(force=false){
+async function autoPush(){
   if(!state.db || state.pushing) return;
-  if(!force && !state.dirty) return;
   state.pushing = true;
   try{
     setStatus("Guardando…");
@@ -445,13 +410,10 @@ async function autoPush(force=false){
 
     bumpMeta(state.db);
     await pushLatest(state.db);
-    saveLocalDb(state.db);
 
     setDirty(false);
     setStatus("Sincronizado");
   }catch(e){
-    // guardado local para no perder cambios
-    try{ saveLocalDb(state.db); }catch{}
     const msg = String(e.message||e);
     if(msg.toLowerCase().includes("content too large") || msg.includes("413")){
       setStatus("Error: BIN demasiado grande (413). Se descartaron adjuntos base64; usá URL para comprobantes.");
@@ -472,8 +434,6 @@ function startAutoPull(){
 
       if(!state.db){
         state.db = normalizeDb(remote);
-        state.db = compactDbForRemote(state.db);
-        saveLocalDb(state.db);
         setDirty(false);
         route({ preserveFocus:false });
         setStatus("Sincronizado");
@@ -487,25 +447,20 @@ function startAutoPull(){
       // Si estás tipeando, NO rerender. Guardamos el update y lo pintamos cuando salgas del input.
       if(state.ui.lock){
         state.db = mergeDb(state.db, remote);
-        state.db = compactDbForRemote(state.db);
-        saveLocalDb(state.db);
         state.ui.pendingRender = true;
         return;
       }
 
       if(!state.dirty){
         state.db = normalizeDb(remote);
-        state.db = compactDbForRemote(state.db);
-        saveLocalDb(state.db);
-        setDirty(false);
+        const changed = postLoadMigrations(state.db);
+        setDirty(changed);
         route({ preserveFocus:false });
-        setStatus("Actualizado");
+        setStatus(changed?"Actualizado (migración)":"Actualizado");
         return;
       }
 
       state.db = mergeDb(state.db, remote);
-      state.db = compactDbForRemote(state.db);
-      saveLocalDb(state.db);
       setDirty(true);
       route({ preserveFocus:false });
       setStatus("Merge…");
@@ -520,20 +475,12 @@ async function boot(force=false){
     if(force || !state.db){
       const remote = await pullLatest();
       state.db = normalizeDb(remote);
-      state.db = compactDbForRemote(state.db);
-      saveLocalDb(state.db);
-      setDirty(false);
+      const changed = postLoadMigrations(state.db);
+      setDirty(changed);
     }
     setStatus("Sincronizado");
   }catch{
-    const local = loadLocalDb();
-    if(local){
-      state.db = normalizeDb(local);
-      setDirty(false);
-      setStatus("Offline (usando local)");
-    }else{
-      setStatus("Offline (sin cache)");
-    }
+    setStatus("Offline (usando local)");
   }finally{
     startAutoPull();
     route({ preserveFocus:false });
@@ -568,26 +515,158 @@ function matchQuery(q, ...fields){
   if(!q) return true;
   return fields.join(" ").toLowerCase().includes(q);
 }
-function renderInlinePdfField(id, label){
-  if(!INLINE_ATTACHMENTS_ENABLED){
-    return `<div class="small">Adjuntos PDF inline desactivados. Pegá una URL (Drive/Dropbox) 👌</div>`;
-  }
-  return `
-    <div>
-      <label>${label}</label>
-      <input id="${id}" type="file" accept="application/pdf"/>
-      <div class="small">Máx: ${(MAX_INLINE_PDF_BYTES/1024/1024).toFixed(1)} MB · Si pesa más: URL.</div>
-    </div>
-  `;
+
+/* ---------------- Categorías + orden (Presupuesto / Gastos reales) ---------------- */
+function isCatRow(r){ return !!(r && typeof r==="object" && r.kind==="cat"); }
+function budgetItems(){ return visible(state.db.budget).filter(r=>!isCatRow(r)); }
+function expenseItems(){ return visible(state.db.expenses).filter(r=>!isCatRow(r)); }
+
+function sortByOrder(a,b){
+  const ao = Number(a?.order||0);
+  const bo = Number(b?.order||0);
+  if(ao!==bo) return ao-bo;
+  return (a?.updatedAt||"").localeCompare(b?.updatedAt||"");
 }
 
-function fileToDataUrl(file){
-  return new Promise((resolve,reject)=>{
-    const r=new FileReader();
-    r.onerror=()=>reject(new Error("No pude leer el archivo."));
-    r.onload=()=>resolve(String(r.result||""));
-    r.readAsDataURL(file);
-  });
+function renumberOrders(recs, step=1000){
+  let i=1;
+  for(const r of recs){
+    r.order = i*step;
+    r.updatedAt = nowISO();
+    i++;
+  }
+}
+
+function stripPdfFields(db){
+  // Por compatibilidad: si existían adjuntos base64 viejos, los limpiamos.
+  let changed=false;
+
+  const strip = (arr, fields)=>{
+    for(const r of (arr||[])){
+      if(!r || typeof r!=="object") continue;
+      let touched=false;
+      for(const f of fields){
+        if(r[f]){
+          try{ delete r[f]; }catch{ r[f] = ""; }
+          touched=true;
+          changed=true;
+        }
+      }
+      if(touched){
+        r.updatedAt = nowISO();
+      }
+    }
+  };
+
+  strip(db.paymentLines, ["receiptDataUrl"]);
+  strip(db.expenses, ["invoiceDataUrl"]);
+  strip(db.documents, ["dataUrl"]);
+  return changed;
+}
+
+function migrateGroupedOrdering(db){
+  // Agrega campos: kind(cat), groupId, order. Solo si faltan.
+  let changed=false;
+
+  const ensure = (arr)=> Array.isArray(arr)?arr:[];
+  const ensureOrderSeq = (recs, step=1000)=>{
+    let i=1;
+    for(const r of recs){
+      r.order = i*step;
+      r.updatedAt = nowISO();
+      i++;
+    }
+  };
+
+  const ensureFor = (name)=>{
+    db[name] = ensure(db[name]);
+    const all = db[name];
+
+    const cats = all.filter(r=>r && r.deleted!==true && r.kind==="cat");
+    const items = all.filter(r=>r && r.deleted!==true && r.kind!=="cat");
+
+    const catsById = Object.fromEntries(cats.map(c=>[c.id,c]));
+
+    // Limpia groupId huérfanos
+    for(const it of items){
+      if(it.groupId && !catsById[it.groupId]){
+        it.groupId = "";
+        it.updatedAt = nowISO();
+        changed=true;
+      }
+    }
+
+    // Categorías: order
+    const catsMissingOrder = cats.filter(c=>typeof c.order!=="number");
+    if(catsMissingOrder.length){
+      const sorted = cats.slice()
+        .sort((a,b)=>(a.order??0)-(b.order??0) || (a.updatedAt||"").localeCompare(b.updatedAt||"") || (a.name||"").localeCompare(b.name||""));
+      let i=1;
+      for(const c of sorted){
+        if(typeof c.order!=="number"){
+          c.order = i*1000;
+          c.updatedAt = nowISO();
+          changed=true;
+        }
+        i++;
+      }
+    }
+
+    // Ítems: order
+    const byGroup = new Map();
+    for(const it of items){
+      const gid = it.groupId || "";
+      if(!byGroup.has(gid)) byGroup.set(gid, []);
+      byGroup.get(gid).push(it);
+    }
+
+    for(const [gid, groupItems] of byGroup.entries()){
+      const missing = groupItems.filter(x=>typeof x.order!=="number");
+      if(!missing.length) continue;
+
+      // Si el grupo no tiene órdenes: preservamos el orden "viejo" para que no te cambie todo de golpe.
+      const allMissing = groupItems.every(x=>typeof x.order!=="number");
+      if(allMissing){
+        let sorted = groupItems.slice();
+        if(name==="budget"){
+          sorted.sort((a,b)=>(deptIndex(a.department)-deptIndex(b.department)) ||
+            (a.category||"").localeCompare(b.category||"") ||
+            (a.vendorId||"").localeCompare(b.vendorId||""));
+        }else{
+          // expenses: fecha desc
+          sorted.sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+        }
+        let i=1;
+        for(const it of sorted){
+          it.order = i*1000;
+          it.updatedAt = nowISO();
+          i++;
+        }
+        changed=true;
+      }else{
+        const max = groupItems.reduce((m,x)=>Math.max(m, Number(x.order||0)), 0);
+        let cur = max || 0;
+        for(const it of missing){
+          cur += 1000;
+          it.order = cur;
+          it.updatedAt = nowISO();
+        }
+        changed=true;
+      }
+    }
+  };
+
+  ensureFor("budget");
+  ensureFor("expenses");
+
+  return changed;
+}
+
+function postLoadMigrations(db){
+  let changed=false;
+  changed = stripPdfFields(db) || changed;
+  changed = migrateGroupedOrdering(db) || changed;
+  return changed;
 }
 
 /* ---------------- Routing ---------------- */
@@ -596,7 +675,7 @@ function ensureDb(){
   view.innerHTML = `
     <div class="card">
       <h2>Sin datos todavía</h2>
-      <p class="small">Estoy intentando cargar desde JSONBin. Si no hay internet, uso el último cache local.</p>
+      <p class="small">Estoy intentando cargar desde JSONBin.</p>
       <div class="row"><button class="btn" id="retry">Reintentar</button></div>
     </div>`;
   $("#retry").onclick = ()=>boot(true);
@@ -625,7 +704,6 @@ function route({ preserveFocus=false } = {}){
   else if(r === "docs") renderDocs();
   else renderDashboard();
 
-  updateBrand();
   if(focus) restoreFocus(focus);
 }
 window.addEventListener("hashchange", ()=>route({ preserveFocus:false }));
@@ -633,7 +711,7 @@ window.addEventListener("hashchange", ()=>route({ preserveFocus:false }));
 /* ---------------- Dashboard ---------------- */
 function calcPlannedByDept(){
   const m=new Map();
-  for(const b of visible(state.db.budget)){
+  for(const b of budgetItems()){
     const dept=b.department||"Otros";
     const total = Number(b.units||0) * Number(b.unitCost||0);
     m.set(dept, (m.get(dept)||0) + total);
@@ -642,15 +720,15 @@ function calcPlannedByDept(){
 }
 function calcActualByDept(){
   const m=new Map();
-  for(const e of visible(state.db.expenses)){
+  for(const e of expenseItems()){
     const dept=e.department||"Otros";
     m.set(dept, (m.get(dept)||0) + Number(e.amount||0));
   }
   return m;
 }
 function renderDashboard(){
-  const plannedTotal = visible(state.db.budget).reduce((s,b)=>s + (Number(b.units||0)*Number(b.unitCost||0)),0);
-  const actualTotal = visible(state.db.expenses).reduce((s,e)=>s + Number(e.amount||0),0);
+  const plannedTotal = budgetItems().reduce((s,b)=>s + (Number(b.units||0)*Number(b.unitCost||0)),0);
+  const actualTotal = expenseItems().reduce((s,e)=>s + Number(e.amount||0),0);
   const diff = actualTotal - plannedTotal;
 
   const today = todayISO();
@@ -681,7 +759,7 @@ function renderDashboard(){
     <div class="card">
       <div class="row" style="justify-content:space-between">
         <div>
-          <h2>${escapeHtml(state.db.project?.name||"Proyecto")} <span class="muted">- Admin.</span></h2>
+          <h2>LA CASONA <span class="muted">- Admin.</span></h2>
           <div class="small">
             Inicio: ${formatDate(state.db.project?.startDate)} · Días: ${escapeHtml(state.db.project?.numDays||10)} · Moneda: ${escapeHtml(state.db.project?.currency||"ARS")}
           </div>
@@ -759,28 +837,124 @@ function renderDueTable(list){
 
 /* ---------------- Presupuesto (nuevo) ---------------- */
 function renderBudget(){
-  const q = filters.budget || "";
+  const q = (filters.budget || "").trim();
   const vendors = visible(state.db.vendors);
   const vendorsById = Object.fromEntries(vendors.map(v=>[v.id,v]));
   const departments = state.db.catalog?.departments || [];
 
-  const list = visible(state.db.budget)
-    .filter(b => matchQuery(q, b.department, b.category, vendorsById[b.vendorId]?.name||"", b.unitType, String(b.units), String(b.unitCost), b.description))
-    .sort((a,b)=>{
-      const da=deptIndex(a.department), db=deptIndex(b.department);
-      if(da!==db) return da-db;
-      return (a.category||"").localeCompare(b.category||"");
-    });
+  const all = visible(state.db.budget);
+  const catsAll = all.filter(isCatRow).sort(sortByOrder);
+  const itemsAll = all.filter(r=>!isCatRow(r));
+
+  const catsById = Object.fromEntries(catsAll.map(c=>[c.id,c]));
+  const effGroup = (it)=> (it.groupId && catsById[it.groupId]) ? it.groupId : "";
+
+  // Buscar: si matchea categoría, muestra todo lo de esa categoría.
+  let items=[], catIds=new Set();
+  if(!q){
+    items = itemsAll;
+    catIds = new Set(items.map(effGroup).filter(Boolean));
+    catsAll.forEach(c=>catIds.add(c.id)); // mostramos todas las categorías aunque estén vacías (sirve para drop)
+  }else{
+    const catMatches = catsAll.filter(c=>matchQuery(q, c.name));
+    const catMatchIds = new Set(catMatches.map(c=>c.id));
+
+    const itemMatches = itemsAll.filter(b => matchQuery(
+      q,
+      b.department, b.category,
+      catsById[b.groupId]?.name||"",
+      vendorsById[b.vendorId]?.name||"",
+      b.unitType, String(b.units), String(b.unitCost),
+      b.description
+    ));
+
+    const itemsInCatMatch = itemsAll.filter(it=>catMatchIds.has(effGroup(it)));
+
+    const map = new Map();
+    for(const it of [...itemMatches, ...itemsInCatMatch]) map.set(it.id, it);
+    items = Array.from(map.values());
+
+    for(const it of items) catIds.add(effGroup(it));
+    catMatches.forEach(c=>catIds.add(c.id));
+  }
+
+  const cats = catsAll.filter(c=>catIds.has(c.id)).sort(sortByOrder);
+
+  const itemsByGroup = new Map();
+  for(const it of items){
+    const gid = effGroup(it);
+    if(!itemsByGroup.has(gid)) itemsByGroup.set(gid, []);
+    itemsByGroup.get(gid).push(it);
+  }
+  for(const [gid, arr] of itemsByGroup.entries()) arr.sort(sortByOrder);
+
+  const canDnD = !q;
+
+  const renderItemRow = (b)=>{
+    const vendorName = vendorsById[b.vendorId]?.name || "—";
+    const total = Number(b.units||0) * Number(b.unitCost||0);
+    const tip = escapeHtml(b.description||"");
+    return `
+      <tr class="itemRow" title="${tip}" data-drop="budget-item" data-id="${b.id}">
+        <td class="dragCell"><span class="dragHandle" draggable="${canDnD}" data-drag="budget-item" data-id="${b.id}" title="${canDnD?"Arrastrar":"Desactivado con búsqueda"}">↕</span></td>
+        <td>${escapeHtml(b.department||"—")}</td>
+        <td>${escapeHtml(b.category||"—")}</td>
+        <td>${escapeHtml(vendorName)}</td>
+        <td>${escapeHtml(b.unitType||"—")}</td>
+        <td>${Number(b.units||0)}</td>
+        <td>$ ${money(b.unitCost||0)}</td>
+        <td>$ ${money(total)}</td>
+        <td class="actionsCell">
+          <div class="actions">
+            <button class="iconbtn accent" title="Editar" data-edit="${b.id}">${ICON.edit}</button>
+            <button class="iconbtn danger" title="Borrar" data-del="${b.id}">${ICON.trash}</button>
+          </div>
+        </td>
+      </tr>`;
+  };
+
+  const renderGroupHeader = (gid, title, count, sum, isRealCat)=>{
+    const collapsed = isRealCat ? !!catsById[gid]?.collapsed : false;
+    const caret = collapsed ? "▶" : "▼";
+    const dropAttr = isRealCat ? `data-drop="budget-cat" data-id="${gid}"` : `data-drop="budget-uncat" data-id="__none__"`;
+    const dragHandle = isRealCat ? `<span class="dragHandle" draggable="${canDnD}" data-drag="budget-cat" data-id="${gid}" title="${canDnD?"Arrastrar categoría":"Desactivado con búsqueda"}">↕</span>` : `<span class="dragHandle mutedHandle" title="Sin categoría">·</span>`;
+    const toggle = isRealCat ? `<button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${gid}">${caret}</button>` : "";
+    const editDel = isRealCat ? `
+      <div class="actions">
+        <button class="iconbtn accent" title="Editar" data-editcat="${gid}">${ICON.edit}</button>
+        <button class="iconbtn danger" title="Borrar" data-delcat="${gid}">${ICON.trash}</button>
+      </div>` : "";
+    return `
+      <tr class="catRow" ${dropAttr}>
+        <td class="dragCell">${dragHandle}</td>
+        <td colspan="7">
+          <div class="catTitle">
+            ${toggle}
+            <div class="catText">
+              <div class="catName">${escapeHtml(title)}</div>
+              <div class="small">${count} ítems · $ ${money(sum)}</div>
+            </div>
+          </div>
+        </td>
+        <td class="actionsCell">${editDel}</td>
+      </tr>`;
+  };
+
+  const sumFor = (arr)=>arr.reduce((s,b)=>s + (Number(b.units||0)*Number(b.unitCost||0)),0);
+
+  const uncatItems = itemsByGroup.get("") || [];
+  const showUncat = uncatItems.length>0 || cats.length===0;
 
   view.innerHTML = `
     <div class="card">
       <div class="toolbar">
         <div>
           <h2>Presupuesto</h2>
-          <div class="small">Hover sobre el ítem para ver descripción.</div>
+          <div class="small">${canDnD ? "Arrastrá filas para reordenar / mover entre categorías." : "Con búsqueda activa no se puede reordenar (para evitar lío)."}</div>
         </div>
-        <div class="row" style="min-width:420px;justify-content:flex-end">
-          ${renderSearch("budget","Buscar depto / rubro / proveedor…")}
+        <div class="row" style="min-width:520px;justify-content:flex-end">
+          ${renderSearch("budget","Buscar depto / rubro / proveedor / categoría…")}
+          <button class="btn" id="btnAddCat">+ Categoría</button>
           <button class="btn" id="btnAdd">+ Ítem</button>
         </div>
       </div>
@@ -790,42 +964,34 @@ function renderBudget(){
       <table>
         <thead>
           <tr>
+            <th style="width:38px"></th>
             <th>Depto</th><th>Rubro</th><th>Proveedor</th><th>Tipo unidad</th><th>Unidades</th><th>$ Unitario</th><th>$ Total</th>
             <th class="actionsCell"></th>
           </tr>
         </thead>
         <tbody>
-          ${list.map(b=>{
-            const vendorName = vendorsById[b.vendorId]?.name || "—";
-            const total = Number(b.units||0) * Number(b.unitCost||0);
-            const tip = escapeHtml(b.description||"");
-            return `
-              <tr title="${tip}">
-                <td>${escapeHtml(b.department||"—")}</td>
-                <td>${escapeHtml(b.category||"—")}</td>
-                <td>${escapeHtml(vendorName)}</td>
-                <td>${escapeHtml(b.unitType||"—")}</td>
-                <td>${Number(b.units||0)}</td>
-                <td>$ ${money(b.unitCost||0)}</td>
-                <td>$ ${money(total)}</td>
-                <td class="actionsCell">
-                  <div class="actions">
-                    <button class="iconbtn accent" title="Editar" data-edit="${b.id}">${ICON.edit}</button>
-                    <button class="iconbtn danger" title="Borrar" data-del="${b.id}">${ICON.trash}</button>
-                  </div>
-                </td>
-              </tr>`;
+          ${showUncat ? renderGroupHeader("", "Sin categoría", uncatItems.length, sumFor(uncatItems), false) : ""}
+          ${showUncat && uncatItems.length ? uncatItems.map(renderItemRow).join("") : ""}
+
+          ${cats.map(c=>{
+            const arr = (itemsByGroup.get(c.id) || []);
+            const sum = sumFor(arr);
+            const head = renderGroupHeader(c.id, c.name || "Categoría", arr.length, sum, true);
+            if(c.collapsed) return head;
+            return head + arr.map(renderItemRow).join("");
           }).join("")}
         </tbody>
       </table>
-      ${list.length? "" : `<div class="small">No hay ítems (o tu búsqueda no encontró nada).</div>`}
+      ${(items.length || cats.length)? "" : `<div class="small">No hay ítems (o tu búsqueda no encontró nada).</div>`}
     </div>
   `;
 
   attachSearch("budget");
 
-  $("#btnAdd").onclick = ()=>openBudgetDialog(null);
+  $("#btnAdd").onclick = ()=>openBudgetItemDialog(null);
+  $("#btnAddCat").onclick = ()=>openBudgetCatDialog(null);
 
+  // Ítems
   view.querySelectorAll("[data-del]").forEach(btn=>{
     btn.onclick = ()=>{
       const rec = state.db.budget.find(x=>x.id===btn.dataset.del);
@@ -835,44 +1001,212 @@ function renderBudget(){
       }
     };
   });
-
   view.querySelectorAll("[data-edit]").forEach(btn=>{
     btn.onclick = ()=>{
       const rec = state.db.budget.find(x=>x.id===btn.dataset.edit);
-      if(rec) openBudgetDialog(rec);
+      if(rec) openBudgetItemDialog(rec);
     };
   });
 
-  function openBudgetDialog(rec){
+  // Categorías
+  view.querySelectorAll("[data-editcat]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const rec = state.db.budget.find(x=>x.id===btn.dataset.editcat && x.deleted!==true && isCatRow(x));
+      if(rec) openBudgetCatDialog(rec);
+    };
+  });
+  view.querySelectorAll("[data-delcat]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const cat = state.db.budget.find(x=>x.id===btn.dataset.delcat && x.deleted!==true && isCatRow(x));
+      if(!cat) return;
+      if(!confirmDelete(`la categoría "${cat.name||"sin nombre"}"`)) return;
+
+      // Los ítems pasan a "Sin categoría"
+      for(const it of state.db.budget){
+        if(it && it.deleted!==true && !isCatRow(it) && it.groupId===cat.id){
+          it.groupId = "";
+          it.updatedAt = nowISO();
+        }
+      }
+      cat.deleted = true;
+      cat.updatedAt = nowISO();
+
+      setDirty(true);
+      route({preserveFocus:false});
+    };
+  });
+  view.querySelectorAll("[data-togglecat]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const cat = state.db.budget.find(x=>x.id===btn.dataset.togglecat && x.deleted!==true && isCatRow(x));
+      if(!cat) return;
+      cat.collapsed = !cat.collapsed;
+      cat.updatedAt = nowISO();
+      setDirty(true);
+      route({preserveFocus:false});
+    };
+  });
+
+  if(canDnD) attachDnD();
+
+  function attachDnD(){
+    view.querySelectorAll("[data-drag]").forEach(h=>{
+      h.ondragstart = (ev)=>{
+        const payload = { kind: h.dataset.drag, id: h.dataset.id };
+        ev.dataTransfer.setData("text/plain", JSON.stringify(payload));
+        ev.dataTransfer.effectAllowed = "move";
+      };
+    });
+
+    view.querySelectorAll("tr[data-drop]").forEach(row=>{
+      row.ondragover = (ev)=>{ ev.preventDefault(); row.classList.add("dropHintRow"); };
+      row.ondragleave = ()=>row.classList.remove("dropHintRow");
+      row.ondrop = (ev)=>{
+        ev.preventDefault();
+        row.classList.remove("dropHintRow");
+        let payload=null;
+        try{ payload = JSON.parse(ev.dataTransfer.getData("text/plain")||""); }catch{}
+        if(!payload?.id || !payload?.kind) return;
+
+        if(payload.kind==="budget-item"){
+          const targetType = row.dataset.drop;
+          const targetId = row.dataset.id || "";
+          const beforeId = (targetType==="budget-item") ? targetId : "";
+          let destGroupId = "";
+
+          if(targetType==="budget-cat") destGroupId = targetId;
+          if(targetType==="budget-uncat") destGroupId = "";
+          if(targetType==="budget-item"){
+            const tgt = state.db.budget.find(x=>x.id===targetId && x.deleted!==true && !isCatRow(x));
+            if(tgt) destGroupId = effGroup(tgt);
+          }
+
+          moveBudgetItem(payload.id, destGroupId, beforeId);
+          setDirty(true);
+          route({preserveFocus:false});
+        }
+
+        if(payload.kind==="budget-cat" && row.dataset.drop==="budget-cat"){
+          reorderBudgetCat(payload.id, row.dataset.id);
+          setDirty(true);
+          route({preserveFocus:false});
+        }
+      };
+    });
+  }
+
+  function groupItems(gid){
+    const catsNow = Object.fromEntries(visible(state.db.budget).filter(isCatRow).map(c=>[c.id,c]));
+    const eff = (it)=> (it.groupId && catsNow[it.groupId]) ? it.groupId : "";
+    return visible(state.db.budget)
+      .filter(r=>!isCatRow(r) && eff(r)===gid)
+      .sort(sortByOrder);
+  }
+
+  function moveBudgetItem(itemId, destGroupId, beforeId){
+    const it = state.db.budget.find(x=>x.id===itemId && x.deleted!==true && !isCatRow(x));
+    if(!it) return;
+
+    const catsNow = Object.fromEntries(visible(state.db.budget).filter(isCatRow).map(c=>[c.id,c]));
+    const eff = (r)=> (r.groupId && catsNow[r.groupId]) ? r.groupId : "";
+    const srcGroup = eff(it);
+    const dest = (destGroupId && catsNow[destGroupId]) ? destGroupId : "";
+
+    // Reordena origen
+    if(srcGroup !== dest){
+      const src = groupItems(srcGroup).filter(x=>x.id!==it.id);
+      renumberOrders(src);
+    }
+
+    it.groupId = dest;
+
+    // Reordena destino
+    let destArr = groupItems(dest).filter(x=>x.id!==it.id);
+    const idx = beforeId ? destArr.findIndex(x=>x.id===beforeId) : -1;
+    if(idx<0) destArr.push(it);
+    else destArr.splice(idx,0,it);
+    renumberOrders(destArr);
+  }
+
+  function reorderBudgetCat(movingId, targetId){
+    if(movingId===targetId) return;
+    const catsNow = visible(state.db.budget).filter(isCatRow).sort(sortByOrder);
+    const moving = catsNow.find(c=>c.id===movingId);
+    const target = catsNow.find(c=>c.id===targetId);
+    if(!moving || !target) return;
+
+    const arr = catsNow.filter(c=>c.id!==movingId);
+    const idx = arr.findIndex(c=>c.id===targetId);
+    if(idx<0) arr.push(moving);
+    else arr.splice(idx,0,moving);
+    renumberOrders(arr);
+  }
+
+  function openBudgetCatDialog(rec){
+    const isEdit=!!rec;
+    openDialog(isEdit?"Editar categoría":"Nueva categoría", `
+      <div class="grid2">
+        <div><label>Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" placeholder="Ej: Rodaje / Post / Arte…"/></div>
+        <div class="small">Arrastrá la categoría para cambiar su orden.</div>
+      </div>
+    `, ()=>{
+      const name = $("#d_name").value.trim();
+      if(!name) throw new Error("Poné un nombre.");
+      if(isEdit){
+        rec.name = name;
+        rec.updatedAt = nowISO();
+      }else{
+        const max = visible(state.db.budget).filter(isCatRow).reduce((m,c)=>Math.max(m, Number(c.order||0)), 0);
+        state.db.budget.push({
+          id: uid("bc"),
+          kind:"cat",
+          name,
+          order: (max||0)+1000,
+          collapsed:false,
+          updatedAt: nowISO(),
+          deleted:false
+        });
+      }
+      setDirty(true);
+      route({preserveFocus:false});
+    });
+  }
+
+  function openBudgetItemDialog(rec){
     const isEdit=!!rec;
     const vendorOpt = vendors.map(v=>`<option value="${v.id}" ${rec?.vendorId===v.id?"selected":""}>${escapeHtml(v.name)}</option>`).join("");
     const deptOpt = departments.map(d=>`<option ${rec?.department===d?"selected":""}>${escapeHtml(d)}</option>`).join("");
+    const catsNow = visible(state.db.budget).filter(isCatRow).sort(sortByOrder);
+    const groupOpt = [`<option value="">Sin categoría</option>`, ...catsNow.map(c=>`<option value="${c.id}" ${rec?.groupId===c.id?"selected":""}>${escapeHtml(c.name||"Categoría")}</option>`)].join("");
 
     openDialog(isEdit?"Editar ítem":"Nuevo ítem", `
       <div class="grid3">
+        <div><label>Categoría</label><select id="d_group">${groupOpt}</select></div>
         <div><label>Depto</label><select id="d_department">${deptOpt}</select></div>
         <div><label>Rubro</label><input id="d_category" value="${escapeHtml(rec?.category||"")}" placeholder="Ej: Cámara"/></div>
-        <div><label>Proveedor *</label>
+      </div>
+
+      <div class="grid3">
+        <div><label>Proveedor (opcional)</label>
           <select id="d_vendor">
             <option value="">—</option>${vendorOpt}
           </select>
         </div>
-      </div>
-
-      <div class="grid3">
         <div><label>Tipo unidad</label><input id="d_unitType" value="${escapeHtml(rec?.unitType||"")}" placeholder="Ej: Día / Jornada / Unidad"/></div>
         <div><label>Unidades</label><input id="d_units" type="number" step="0.01" value="${Number(rec?.units||0)}"/></div>
+      </div>
+
+      <div class="grid2">
         <div><label>$ Unitario</label><input id="d_unitCost" type="number" step="0.01" value="${Number(rec?.unitCost||0)}"/></div>
+        <div><label>Orden</label><input id="d_order" type="number" step="1" value="${Number(rec?.order||0)}" placeholder="(auto)"/></div>
       </div>
 
       <div><label>Descripción (hover)</label><textarea id="d_description">${escapeHtml(rec?.description||"")}</textarea></div>
     `, ()=>{
-      const vendorId = $("#d_vendor").value;
-      if(!vendorId) throw new Error("Proveedor es obligatorio.");
       const payload = {
+        groupId: $("#d_group").value || "",
         department: $("#d_department").value,
         category: $("#d_category").value.trim(),
-        vendorId,
+        vendorId: $("#d_vendor").value || "",
         unitType: $("#d_unitType").value.trim(),
         units: Number($("#d_units").value||0),
         unitCost: Number($("#d_unitCost").value||0),
@@ -883,7 +1217,11 @@ function renderBudget(){
         Object.assign(rec, payload);
         rec.updatedAt=nowISO();
       }else{
-        state.db.budget.push({ id: uid("b"), updatedAt: nowISO(), deleted:false, ...payload });
+        const gid = payload.groupId || "";
+        const max = visible(state.db.budget)
+          .filter(r=>!isCatRow(r) && (r.groupId||"")===gid)
+          .reduce((m,r)=>Math.max(m, Number(r.order||0)), 0);
+        state.db.budget.push({ id: uid("b"), updatedAt: nowISO(), deleted:false, order:(max||0)+1000, ...payload });
       }
       setDirty(true);
       route({preserveFocus:false});
@@ -893,24 +1231,129 @@ function renderBudget(){
 
 /* ---------------- Gastos reales (con parciales) ---------------- */
 function renderExpenses(){
-  const q = filters.expenses || "";
+  const q = (filters.expenses || "").trim();
   const vendors = visible(state.db.vendors);
   const vendorsById = Object.fromEntries(vendors.map(v=>[v.id,v]));
   const departments = state.db.catalog?.departments || [];
 
-  const list = visible(state.db.expenses)
-    .filter(e => matchQuery(q, e.concept, e.department, e.dueDate, e.serviceDate, vendorsById[e.vendorId]?.name||"", String(e.amount||0)))
-    .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  const all = visible(state.db.expenses);
+  const catsAll = all.filter(isCatRow).sort(sortByOrder);
+  const itemsAll = all.filter(r=>!isCatRow(r));
+
+  const catsById = Object.fromEntries(catsAll.map(c=>[c.id,c]));
+  const effGroup = (it)=> (it.groupId && catsById[it.groupId]) ? it.groupId : "";
+
+  // Buscar: si matchea categoría, muestra todo lo de esa categoría.
+  let items=[], catIds=new Set();
+  if(!q){
+    items = itemsAll;
+    catsAll.forEach(c=>catIds.add(c.id)); // mostramos todas las categorías aunque estén vacías (sirve para drop)
+  }else{
+    const catMatches = catsAll.filter(c=>matchQuery(q, c.name));
+    const catMatchIds = new Set(catMatches.map(c=>c.id));
+
+    const itemMatches = itemsAll.filter(e => matchQuery(
+      q,
+      e.date, e.dueDate, e.serviceDate,
+      e.department, e.concept,
+      catsById[e.groupId]?.name||"",
+      vendorsById[e.vendorId]?.name||""
+    ));
+
+    const itemsInCatMatch = itemsAll.filter(it=>catMatchIds.has(effGroup(it)));
+
+    const map = new Map();
+    for(const it of [...itemMatches, ...itemsInCatMatch]) map.set(it.id, it);
+    items = Array.from(map.values());
+
+    for(const it of items) catIds.add(effGroup(it));
+    catMatches.forEach(c=>catIds.add(c.id));
+  }
+
+  const cats = catsAll.filter(c=>catIds.has(c.id)).sort(sortByOrder);
+
+  const itemsByGroup = new Map();
+  for(const it of items){
+    const gid = effGroup(it);
+    if(!itemsByGroup.has(gid)) itemsByGroup.set(gid, []);
+    itemsByGroup.get(gid).push(it);
+  }
+  for(const [gid, arr] of itemsByGroup.entries()) arr.sort(sortByOrder);
+
+  const canDnD = !q;
+
+  const renderItemRow = (e)=>{
+    const vendorName = vendorsById[e.vendorId]?.name || "—";
+    const paid = sumPaid(e.id);
+    const rem = remainingForExpense(e);
+    const st = expenseStatus(e);
+    const badge = statusBadgeClass(st, e.dueDate);
+
+    return `
+      <tr class="itemRow" data-drop="exp-item" data-id="${e.id}">
+        <td class="dragCell"><span class="dragHandle" draggable="${canDnD}" data-drag="exp-item" data-id="${e.id}" title="${canDnD?"Arrastrar":"Desactivado con búsqueda"}">↕</span></td>
+        <td>${formatDate(e.date)}</td>
+        <td>${escapeHtml(vendorName)}</td>
+        <td>${escapeHtml(e.department||"—")}</td>
+        <td>${escapeHtml(e.concept||"—")}</td>
+        <td>$ ${money(e.amount||0)}</td>
+        <td>${formatDate(e.serviceDate)}</td>
+        <td>${formatDate(e.dueDate)}</td>
+        <td>$ ${money(paid)}</td>
+        <td>$ ${money(rem)}</td>
+        <td><span class="badge ${badge}">${statusLabel(st)}</span></td>
+        <td class="actionsCell">
+          <div class="actions">
+            ${rem>0 ? `<button class="iconbtn good" title="Registrar pago" data-pay="${e.id}">${ICON.pay}</button>` : ""}
+            <button class="iconbtn accent" title="Editar" data-edit="${e.id}">${ICON.edit}</button>
+            <button class="iconbtn danger" title="Borrar" data-del="${e.id}">${ICON.trash}</button>
+          </div>
+        </td>
+      </tr>`;
+  };
+
+  const renderGroupHeader = (gid, title, count, sum, isRealCat)=>{
+    const collapsed = isRealCat ? !!catsById[gid]?.collapsed : false;
+    const caret = collapsed ? "▶" : "▼";
+    const dropAttr = isRealCat ? `data-drop="exp-cat" data-id="${gid}"` : `data-drop="exp-uncat" data-id="__none__"`;
+    const dragHandle = isRealCat ? `<span class="dragHandle" draggable="${canDnD}" data-drag="exp-cat" data-id="${gid}" title="${canDnD?"Arrastrar categoría":"Desactivado con búsqueda"}">↕</span>` : `<span class="dragHandle mutedHandle" title="Sin categoría">·</span>`;
+    const toggle = isRealCat ? `<button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${gid}">${caret}</button>` : "";
+    const editDel = isRealCat ? `
+      <div class="actions">
+        <button class="iconbtn accent" title="Editar" data-editcat="${gid}">${ICON.edit}</button>
+        <button class="iconbtn danger" title="Borrar" data-delcat="${gid}">${ICON.trash}</button>
+      </div>` : "";
+    return `
+      <tr class="catRow" ${dropAttr}>
+        <td class="dragCell">${dragHandle}</td>
+        <td colspan="10">
+          <div class="catTitle">
+            ${toggle}
+            <div class="catText">
+              <div class="catName">${escapeHtml(title)}</div>
+              <div class="small">${count} gastos · $ ${money(sum)}</div>
+            </div>
+          </div>
+        </td>
+        <td class="actionsCell">${editDel}</td>
+      </tr>`;
+  };
+
+  const sumFor = (arr)=>arr.reduce((s,e)=>s + Number(e.amount||0),0);
+
+  const uncatItems = itemsByGroup.get("") || [];
+  const showUncat = uncatItems.length>0 || cats.length===0;
 
   view.innerHTML = `
     <div class="card">
       <div class="toolbar">
         <div>
           <h2>Gastos reales</h2>
-          <div class="small">Estado = se calcula por suma de pagos (permite parcial).</div>
+          <div class="small">${canDnD ? "Arrastrá filas para reordenar / mover entre categorías." : "Con búsqueda activa no se puede reordenar."}</div>
         </div>
-        <div class="row" style="min-width:420px;justify-content:flex-end">
-          ${renderSearch("expenses","Buscar proveedor / concepto / fecha…")}
+        <div class="row" style="min-width:520px;justify-content:flex-end">
+          ${renderSearch("expenses","Buscar concepto / proveedor / depto / categoría…")}
+          <button class="btn" id="btnAddCat">+ Categoría</button>
           <button class="btn" id="btnAdd">+ Gasto</button>
         </div>
       </div>
@@ -920,54 +1363,39 @@ function renderExpenses(){
       <table>
         <thead>
           <tr>
-            <th>Fecha</th><th>Proveedor</th><th>Depto</th><th>Concepto</th><th>Total</th>
-            <th>Ejecución</th><th>Vence</th><th>Pagado</th><th>Saldo</th><th>Estado</th>
+            <th style="width:38px"></th>
+            <th>Fecha</th><th>Proveedor</th><th>Depto</th><th>Concepto</th>
+            <th>Total</th><th>Ejecución</th><th>Vence</th><th>Pagado</th><th>Saldo</th><th>Estado</th>
             <th class="actionsCell"></th>
           </tr>
         </thead>
         <tbody>
-          ${list.map(e=>{
-            const vendorName = vendorsById[e.vendorId]?.name || "—";
-            const paid = sumPaid(e.id);
-            const rem = remainingForExpense(e);
-            const st = expenseStatus(e);
-            const badge = statusBadgeClass(st, e.dueDate);
-            return `
-              <tr>
-                <td>${formatDate(e.date)}</td>
-                <td>${escapeHtml(vendorName)}</td>
-                <td>${escapeHtml(e.department||"—")}</td>
-                <td>${escapeHtml(e.concept||"—")}</td>
-                <td>$ ${money(e.amount||0)}</td>
-                <td>${formatDate(e.serviceDate)}</td>
-                <td>${formatDate(e.dueDate)}</td>
-                <td>$ ${money(paid)}</td>
-                <td>$ ${money(rem)}</td>
-                <td><span class="badge ${badge}">${statusLabel(st)}</span></td>
-                <td class="actionsCell">
-                  <div class="actions">
-                    ${rem>0 ? `<button class="iconbtn good" title="Registrar pago" data-pay="${e.id}">${ICON.pay}</button>` : ""}
-                    <button class="iconbtn accent" title="Editar" data-edit="${e.id}">${ICON.edit}</button>
-                    <button class="iconbtn danger" title="Borrar" data-del="${e.id}">${ICON.trash}</button>
-                  </div>
-                </td>
-              </tr>`;
+          ${showUncat ? renderGroupHeader("", "Sin categoría", uncatItems.length, sumFor(uncatItems), false) : ""}
+          ${showUncat && uncatItems.length ? uncatItems.map(renderItemRow).join("") : ""}
+
+          ${cats.map(c=>{
+            const arr = (itemsByGroup.get(c.id) || []);
+            const sum = sumFor(arr);
+            const head = renderGroupHeader(c.id, c.name || "Categoría", arr.length, sum, true);
+            if(c.collapsed) return head;
+            return head + arr.map(renderItemRow).join("");
           }).join("")}
         </tbody>
       </table>
-      ${list.length? "" : `<div class="small">No hay gastos (o tu búsqueda no encontró nada).</div>`}
+      ${(items.length || cats.length)? "" : `<div class="small">No hay gastos (o tu búsqueda no encontró nada).</div>`}
     </div>
   `;
 
   attachSearch("expenses");
   $("#btnAdd").onclick = ()=>openExpenseDialog(null);
+  $("#btnAddCat").onclick = ()=>openExpenseCatDialog(null);
 
+  // Ítems
   view.querySelectorAll("[data-del]").forEach(btn=>{
     btn.onclick = ()=>{
-      const rec = state.db.expenses.find(x=>x.id===btn.dataset.del);
+      const rec = state.db.expenses.find(x=>x.id===btn.dataset.del && x.deleted!==true && !isCatRow(x));
       if(rec && confirmDelete("este gasto")){
         rec.deleted=true; rec.updatedAt=nowISO();
-        // también tombstone de sus pagos
         for(const pl of paymentLinesForExpense(rec.id)){
           pl.deleted=true; pl.updatedAt=nowISO();
         }
@@ -979,35 +1407,198 @@ function renderExpenses(){
 
   view.querySelectorAll("[data-edit]").forEach(btn=>{
     btn.onclick = ()=>{
-      const rec = state.db.expenses.find(x=>x.id===btn.dataset.edit);
+      const rec = state.db.expenses.find(x=>x.id===btn.dataset.edit && x.deleted!==true && !isCatRow(x));
       if(rec) openExpenseDialog(rec);
     };
   });
 
   view.querySelectorAll("[data-pay]").forEach(btn=>{
     btn.onclick = ()=>{
-      const rec = state.db.expenses.find(x=>x.id===btn.dataset.pay);
+      const rec = state.db.expenses.find(x=>x.id===btn.dataset.pay && x.deleted!==true && !isCatRow(x));
       if(rec) openPayDialog(rec);
     };
   });
+
+  // Categorías
+  view.querySelectorAll("[data-editcat]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const rec = state.db.expenses.find(x=>x.id===btn.dataset.editcat && x.deleted!==true && isCatRow(x));
+      if(rec) openExpenseCatDialog(rec);
+    };
+  });
+  view.querySelectorAll("[data-delcat]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const cat = state.db.expenses.find(x=>x.id===btn.dataset.delcat && x.deleted!==true && isCatRow(x));
+      if(!cat) return;
+      if(!confirmDelete(`la categoría "${cat.name||"sin nombre"}"`)) return;
+
+      for(const it of state.db.expenses){
+        if(it && it.deleted!==true && !isCatRow(it) && it.groupId===cat.id){
+          it.groupId = "";
+          it.updatedAt = nowISO();
+        }
+      }
+      cat.deleted = true;
+      cat.updatedAt = nowISO();
+
+      setDirty(true);
+      route({preserveFocus:false});
+    };
+  });
+  view.querySelectorAll("[data-togglecat]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const cat = state.db.expenses.find(x=>x.id===btn.dataset.togglecat && x.deleted!==true && isCatRow(x));
+      if(!cat) return;
+      cat.collapsed = !cat.collapsed;
+      cat.updatedAt = nowISO();
+      setDirty(true);
+      route({preserveFocus:false});
+    };
+  });
+
+  if(canDnD) attachDnD();
+
+  function attachDnD(){
+    view.querySelectorAll("[data-drag]").forEach(h=>{
+      h.ondragstart = (ev)=>{
+        const payload = { kind: h.dataset.drag, id: h.dataset.id };
+        ev.dataTransfer.setData("text/plain", JSON.stringify(payload));
+        ev.dataTransfer.effectAllowed = "move";
+      };
+    });
+
+    view.querySelectorAll("tr[data-drop]").forEach(row=>{
+      row.ondragover = (ev)=>{ ev.preventDefault(); row.classList.add("dropHintRow"); };
+      row.ondragleave = ()=>row.classList.remove("dropHintRow");
+      row.ondrop = (ev)=>{
+        ev.preventDefault();
+        row.classList.remove("dropHintRow");
+        let payload=null;
+        try{ payload = JSON.parse(ev.dataTransfer.getData("text/plain")||""); }catch{}
+        if(!payload?.id || !payload?.kind) return;
+
+        if(payload.kind==="exp-item"){
+          const targetType = row.dataset.drop;
+          const targetId = row.dataset.id || "";
+          const beforeId = (targetType==="exp-item") ? targetId : "";
+          let destGroupId = "";
+
+          if(targetType==="exp-cat") destGroupId = targetId;
+          if(targetType==="exp-uncat") destGroupId = "";
+          if(targetType==="exp-item"){
+            const tgt = state.db.expenses.find(x=>x.id===targetId && x.deleted!==true && !isCatRow(x));
+            if(tgt) destGroupId = effGroup(tgt);
+          }
+
+          moveExpenseItem(payload.id, destGroupId, beforeId);
+          setDirty(true);
+          route({preserveFocus:false});
+        }
+
+        if(payload.kind==="exp-cat" && row.dataset.drop==="exp-cat"){
+          reorderExpenseCat(payload.id, row.dataset.id);
+          setDirty(true);
+          route({preserveFocus:false});
+        }
+      };
+    });
+  }
+
+  function groupItems(gid){
+    const catsNow = Object.fromEntries(visible(state.db.expenses).filter(isCatRow).map(c=>[c.id,c]));
+    const eff = (it)=> (it.groupId && catsNow[it.groupId]) ? it.groupId : "";
+    return visible(state.db.expenses)
+      .filter(r=>!isCatRow(r) && eff(r)===gid)
+      .sort(sortByOrder);
+  }
+
+  function moveExpenseItem(itemId, destGroupId, beforeId){
+    const it = state.db.expenses.find(x=>x.id===itemId && x.deleted!==true && !isCatRow(x));
+    if(!it) return;
+
+    const catsNow = Object.fromEntries(visible(state.db.expenses).filter(isCatRow).map(c=>[c.id,c]));
+    const eff = (r)=> (r.groupId && catsNow[r.groupId]) ? r.groupId : "";
+    const srcGroup = eff(it);
+    const dest = (destGroupId && catsNow[destGroupId]) ? destGroupId : "";
+
+    if(srcGroup !== dest){
+      const src = groupItems(srcGroup).filter(x=>x.id!==it.id);
+      renumberOrders(src);
+    }
+
+    it.groupId = dest;
+
+    let destArr = groupItems(dest).filter(x=>x.id!==it.id);
+    const idx = beforeId ? destArr.findIndex(x=>x.id===beforeId) : -1;
+    if(idx<0) destArr.push(it);
+    else destArr.splice(idx,0,it);
+    renumberOrders(destArr);
+  }
+
+  function reorderExpenseCat(movingId, targetId){
+    if(movingId===targetId) return;
+    const catsNow = visible(state.db.expenses).filter(isCatRow).sort(sortByOrder);
+    const moving = catsNow.find(c=>c.id===movingId);
+    const target = catsNow.find(c=>c.id===targetId);
+    if(!moving || !target) return;
+
+    const arr = catsNow.filter(c=>c.id!==movingId);
+    const idx = arr.findIndex(c=>c.id===targetId);
+    if(idx<0) arr.push(moving);
+    else arr.splice(idx,0,moving);
+    renumberOrders(arr);
+  }
+
+  function openExpenseCatDialog(rec){
+    const isEdit=!!rec;
+    openDialog(isEdit?"Editar categoría":"Nueva categoría", `
+      <div class="grid2">
+        <div><label>Nombre</label><input id="d_name" value="${escapeHtml(rec?.name||"")}" placeholder="Ej: Rodaje / Post / Arte…"/></div>
+        <div class="small">Arrastrá la categoría para cambiar su orden.</div>
+      </div>
+    `, ()=>{
+      const name = $("#d_name").value.trim();
+      if(!name) throw new Error("Poné un nombre.");
+      if(isEdit){
+        rec.name = name;
+        rec.updatedAt = nowISO();
+      }else{
+        const max = visible(state.db.expenses).filter(isCatRow).reduce((m,c)=>Math.max(m, Number(c.order||0)), 0);
+        state.db.expenses.push({
+          id: uid("ec"),
+          kind:"cat",
+          name,
+          order: (max||0)+1000,
+          collapsed:false,
+          updatedAt: nowISO(),
+          deleted:false
+        });
+      }
+      setDirty(true);
+      route({preserveFocus:false});
+    });
+  }
 
   function openExpenseDialog(rec){
     const isEdit=!!rec;
     const vendorOpt = vendors.map(v=>`<option value="${v.id}" ${rec?.vendorId===v.id?"selected":""}>${escapeHtml(v.name)}</option>`).join("");
     const deptOpt = departments.map(d=>`<option ${rec?.department===d?"selected":""}>${escapeHtml(d)}</option>`).join("");
+    const catsNow = visible(state.db.expenses).filter(isCatRow).sort(sortByOrder);
+    const groupOpt = [`<option value="">Sin categoría</option>`, ...catsNow.map(c=>`<option value="${c.id}" ${rec?.groupId===c.id?"selected":""}>${escapeHtml(c.name||"Categoría")}</option>`)].join("");
 
-    const existingPays = paymentLinesForExpense(rec?.id||"");
+    const existingPays = rec ? paymentLinesForExpense(rec.id) : [];
     const paidSum = rec ? sumPaid(rec.id) : 0;
     const rem = rec ? remainingForExpense(rec) : 0;
 
     openDialog(isEdit?"Editar gasto":"Nuevo gasto", `
       <div class="grid3">
+        <div><label>Categoría</label><select id="d_group">${groupOpt}</select></div>
         <div><label>Fecha</label><input id="d_date" type="date" value="${escapeHtml(rec?.date||todayISO())}"/></div>
-        <div><label>Proveedor</label><select id="d_vendor"><option value="">—</option>${vendorOpt}</select></div>
-        <div><label>Depto</label><select id="d_department">${deptOpt}</select></div>
+        <div><label>Proveedor *</label><select id="d_vendor"><option value="">—</option>${vendorOpt}</select></div>
       </div>
 
-      <div class="grid2">
+      <div class="grid3">
+        <div><label>Depto</label><select id="d_department">${deptOpt}</select></div>
         <div><label>Concepto</label><input id="d_concept" value="${escapeHtml(rec?.concept||"")}" /></div>
         <div><label>Total ($)</label><input id="d_amount" type="number" step="0.01" value="${Number(rec?.amount||0)}"/></div>
       </div>
@@ -1017,10 +1608,7 @@ function renderExpenses(){
         <div><label>Vencimiento pago</label><input id="d_dueDate" type="date" value="${escapeHtml(rec?.dueDate||"")}"/></div>
       </div>
 
-      <div class="grid2">
-        <div><label>Factura/Comprobante (URL)</label><input id="d_invoiceUrl" value="${escapeHtml(rec?.invoiceUrl||"")}" placeholder="https://..."/></div>
-        ${renderInlinePdfField("d_invoiceFile","Adjuntar PDF factura (opcional, chico)")}
-      </div>
+      <div><label>Factura/Comprobante (link)</label><input id="d_invoiceUrl" value="${escapeHtml(rec?.invoiceUrl||"")}" placeholder="https://..."/></div>
 
       <div><label>Notas</label><textarea id="d_notes">${escapeHtml(rec?.notes||"")}</textarea></div>
 
@@ -1035,7 +1623,7 @@ function renderExpenses(){
               <thead><tr><th>Fecha</th><th>Método</th><th>Monto</th><th>Comprobante</th><th class="actionsCell"></th></tr></thead>
               <tbody>
                 ${existingPays.map(pl=>{
-                  const link = pl.receiptUrl ? `<a href="${pl.receiptUrl}" target="_blank" rel="noopener">Abrir</a>` : (pl.receiptDataUrl ? `<a href="${pl.receiptDataUrl}" target="_blank" rel="noopener">Abrir</a>` : "—");
+                  const link = pl.receiptUrl ? `<a href="${pl.receiptUrl}" target="_blank" rel="noopener">Abrir</a>` : "—";
                   return `<tr>
                     <td>${formatDate(pl.paidAt)}</td>
                     <td>${escapeHtml(pl.method||"—")}</td>
@@ -1054,26 +1642,20 @@ function renderExpenses(){
           ` : `<div class="small">No hay pagos todavía.</div>`}
         </div>
       ` : ``}
-    `, async ()=>{
-      const invInput = $("#d_invoiceFile");
-      const file = invInput?.files?.[0] || null;
-      let invoiceDataUrl = rec?.invoiceDataUrl || "";
-      if(file){
-        if(!INLINE_ATTACHMENTS_ENABLED) alert("Adjuntos inline desactivados. Pegá una URL.");
-        else if(file.size > MAX_INLINE_PDF_BYTES) alert("PDF grande. Usá URL.");
-        else invoiceDataUrl = await fileToDataUrl(file);
-      }
+    `, ()=>{
+      const vendorId = $("#d_vendor").value;
+      if(!vendorId) throw new Error("En gastos reales el proveedor es obligatorio.");
 
       const payload = {
+        groupId: $("#d_group").value || "",
         date: $("#d_date").value,
-        vendorId: $("#d_vendor").value,
+        vendorId,
         department: $("#d_department").value,
         concept: $("#d_concept").value.trim(),
         amount: Number($("#d_amount").value||0),
         serviceDate: $("#d_serviceDate").value,
         dueDate: $("#d_dueDate").value,
         invoiceUrl: $("#d_invoiceUrl").value.trim(),
-        invoiceDataUrl,
         notes: $("#d_notes").value.trim()
       };
 
@@ -1081,14 +1663,17 @@ function renderExpenses(){
         Object.assign(rec, payload);
         rec.updatedAt=nowISO();
       }else{
-        state.db.expenses.push({ id: uid("e"), updatedAt: nowISO(), deleted:false, ...payload });
+        const gid = payload.groupId || "";
+        const max = visible(state.db.expenses)
+          .filter(r=>!isCatRow(r) && (r.groupId||"")===gid)
+          .reduce((m,r)=>Math.max(m, Number(r.order||0)), 0);
+        state.db.expenses.push({ id: uid("e"), updatedAt: nowISO(), deleted:false, order:(max||0)+1000, ...payload });
       }
 
       setDirty(true);
       route({preserveFocus:false});
     });
 
-    // Handlers internos (editar/borrar paymentLines dentro del dialog)
     if(isEdit){
       const btnPayInside = $("#btnPayInside");
       if(btnPayInside) btnPayInside.onclick = ()=>openPayDialog(rec);
@@ -1099,72 +1684,86 @@ function renderExpenses(){
           if(pl && confirmDelete("este pago")){
             pl.deleted=true; pl.updatedAt=nowISO();
             setDirty(true);
-            dlg.close();
             route({preserveFocus:false});
           }
         };
       });
+
       dlgBody.querySelectorAll("[data-editpl]").forEach(btn=>{
         btn.onclick = ()=>{
           const pl = state.db.paymentLines.find(x=>x.id===btn.dataset.editpl);
-          if(pl){
-            dlg.close();
-            openPaymentLineDialog(pl);
-          }
+          if(pl) openPaymentLineDialog(pl, rec);
         };
       });
     }
   }
 
   function openPayDialog(exp){
-    const rem = remainingForExpense(exp);
-    const vendorsById = Object.fromEntries(visible(state.db.vendors).map(v=>[v.id,v]));
-    const vendorName = vendorsById[exp.vendorId]?.name || "—";
+    const methods = ["Transferencia","Efectivo","Tarjeta","Cheque","Otro"];
+    const methodOpt = methods.map(m=>`<option ${m===state.ui.lastPayMethod?"selected":""}>${m}</option>`).join("");
 
-    openDialog(`Registrar pago (${vendorName})`, `
+    openDialog("Registrar pago", `
       <div class="grid3">
-        <div><label>Fecha pago</label><input id="d_paidAt" type="date" value="${todayISO()}"/></div>
-        <div><label>Método</label>
-          <select id="d_method">
-            ${["Transferencia","Efectivo","Cheque","Tarjeta","Otro"].map(m=>`<option>${escapeHtml(m)}</option>`).join("")}
-          </select>
-        </div>
-        <div><label>Monto</label><input id="d_amount" type="number" step="0.01" value="${Number(rem.toFixed(2))}"/></div>
+        <div><label>Fecha</label><input id="p_date" type="date" value="${todayISO()}"/></div>
+        <div><label>Método</label><select id="p_method">${methodOpt}</select></div>
+        <div><label>Monto ($)</label><input id="p_amount" type="number" step="0.01" value="${Number(remainingForExpense(exp)||0)}"/></div>
       </div>
-
       <div class="grid2">
-        <div><label>Comprobante (URL)</label><input id="d_receiptUrl" placeholder="https://..." /></div>
-        ${renderInlinePdfField("d_receiptFile","Adjuntar PDF (opcional, chico)")}
+        <div><label>Comprobante (link)</label><input id="p_receiptUrl" placeholder="https://..." /></div>
+        <div><label>Notas</label><input id="p_notes" /></div>
       </div>
-
-      <div class="small">Saldo actual: $ ${money(rem)} · Si pagás menos, queda <b>Pagado parcial</b>.</div>
-    `, async ()=>{
-      const amt = Number($("#d_amount").value||0);
-      if(amt<=0) throw new Error("Monto inválido.");
-      if(amt > rem + 0.0001) throw new Error("No podés pagar más que el saldo.");
-
-      const recInput = $("#d_receiptFile");
-      const file = recInput?.files?.[0] || null;
-      let receiptDataUrl = "";
-      if(file){
-        if(!INLINE_ATTACHMENTS_ENABLED) alert("Adjuntos inline desactivados. Pegá una URL.");
-        else if(file.size > MAX_INLINE_PDF_BYTES) alert("PDF grande. Usá URL.");
-        else receiptDataUrl = await fileToDataUrl(file);
-      }
-
-      state.db.paymentLines.push({
-        id: uid("pl"),
-        updatedAt: nowISO(),
-        deleted:false,
+    `, ()=>{
+      const amount = Number($("#p_amount").value||0);
+      if(amount<=0) throw new Error("Monto inválido.");
+      const payload = {
         expenseId: exp.id,
-        vendorId: exp.vendorId || "",
-        amount: amt,
-        paidAt: $("#d_paidAt").value,
-        method: $("#d_method").value,
-        receiptUrl: $("#d_receiptUrl").value.trim(),
-        receiptDataUrl,
-        notes:""
-      });
+        vendorId: exp.vendorId,
+        paidAt: $("#p_date").value,
+        method: $("#p_method").value,
+        amount,
+        receiptUrl: $("#p_receiptUrl").value.trim(),
+        notes: $("#p_notes").value.trim()
+      };
+      state.ui.lastPayMethod = payload.method;
+
+      state.db.paymentLines.push({ id: uid("pl"), updatedAt: nowISO(), deleted:false, ...payload });
+
+      setDirty(true);
+      route({preserveFocus:false});
+    });
+  }
+
+  function openPaymentLineDialog(pl, exp){
+    const isEdit=!!pl;
+    const methods = ["Transferencia","Efectivo","Tarjeta","Cheque","Otro"];
+    const methodOpt = methods.map(m=>`<option ${m===pl?.method?"selected":""}>${m}</option>`).join("");
+
+    openDialog(isEdit?"Editar pago":"Nuevo pago", `
+      <div class="grid3">
+        <div><label>Fecha</label><input id="p_date" type="date" value="${escapeHtml(pl?.paidAt||todayISO())}"/></div>
+        <div><label>Método</label><select id="p_method">${methodOpt}</select></div>
+        <div><label>Monto ($)</label><input id="p_amount" type="number" step="0.01" value="${Number(pl?.amount||0)}"/></div>
+      </div>
+      <div class="grid2">
+        <div><label>Comprobante (link)</label><input id="p_receiptUrl" value="${escapeHtml(pl?.receiptUrl||"")}" placeholder="https://..."/></div>
+        <div><label>Notas</label><input id="p_notes" value="${escapeHtml(pl?.notes||"")}" /></div>
+      </div>
+    `, ()=>{
+      const amount = Number($("#p_amount").value||0);
+      if(amount<=0) throw new Error("Monto inválido.");
+
+      const payload = {
+        expenseId: exp.id,
+        vendorId: exp.vendorId,
+        paidAt: $("#p_date").value,
+        method: $("#p_method").value,
+        amount,
+        receiptUrl: $("#p_receiptUrl").value.trim(),
+        notes: $("#p_notes").value.trim()
+      };
+
+      Object.assign(pl, payload);
+      pl.updatedAt=nowISO();
 
       setDirty(true);
       route({preserveFocus:false});
@@ -1202,7 +1801,7 @@ function renderPayments(){
           ${list.map(pl=>{
             const vendorName = vendorsById[pl.vendorId]?.name || "—";
             const concept = expById[pl.expenseId]?.concept || "—";
-            const link = pl.receiptUrl ? `<a href="${pl.receiptUrl}" target="_blank" rel="noopener">Abrir</a>` : (pl.receiptDataUrl ? `<a href="${pl.receiptDataUrl}" target="_blank" rel="noopener">Abrir</a>` : "—");
+            const link = pl.receiptUrl ? `<a href="${pl.receiptUrl}" target="_blank" rel="noopener">Abrir</a>` : "—";
             return `
               <tr>
                 <td>${formatDate(pl.paidAt)}</td>
@@ -1258,11 +1857,11 @@ function openPaymentLineDialog(pl){
       <div><label>Monto</label><input id="d_amount" type="number" step="0.01" value="${Number(pl.amount||0)}"/></div>
     </div>
     <div class="grid2">
-      <div><label>Comprobante (URL)</label><input id="d_receiptUrl" value="${escapeHtml(pl.receiptUrl||"")}" /></div>
-      ${renderInlinePdfField("d_receiptFile","Adjuntar PDF (opcional, chico)")}
+      <div><label>Comprobante (link)</label><input id="d_receiptUrl" value="${escapeHtml(pl.receiptUrl||"")}" placeholder="https://..."/></div>
+      <div class="small">PDFs deshabilitados: usá link (Drive/Dropbox/etc.).</div>
     </div>
-  `, async ()=>{
-    const exp = state.db.expenses.find(e=>e.id===pl.expenseId && e.deleted!==true);
+  `, ()=>{
+    const exp = state.db.expenses.find(e=>e.id===pl.expenseId && e.deleted!==true && !isCatRow(e));
     if(!exp) throw new Error("Este pago está ligado a un gasto inexistente.");
     const alreadyPaidOther = sumPaid(exp.id) - Number(pl.amount||0);
     const newAmt = Number($("#d_amount").value||0);
@@ -1270,20 +1869,11 @@ function openPaymentLineDialog(pl){
     if(newAmt<=0) throw new Error("Monto inválido.");
     if(newAmt > max + 0.0001) throw new Error("Monto supera el saldo del gasto.");
 
-    const recInput = $("#d_receiptFile");
-    const file = recInput?.files?.[0] || null;
-    let receiptDataUrl = pl.receiptDataUrl || "";
-    if(file){
-      if(!INLINE_ATTACHMENTS_ENABLED) alert("Adjuntos inline desactivados. Pegá una URL.");
-      else if(file.size > MAX_INLINE_PDF_BYTES) alert("PDF grande. Usá URL.");
-      else receiptDataUrl = await fileToDataUrl(file);
-    }
-
     pl.paidAt = $("#d_paidAt").value;
     pl.method = $("#d_method").value;
     pl.amount = newAmt;
     pl.receiptUrl = $("#d_receiptUrl").value.trim();
-    pl.receiptDataUrl = receiptDataUrl;
+    if("receiptDataUrl" in pl) delete pl.receiptDataUrl;
     pl.updatedAt = nowISO();
 
     setDirty(true);
@@ -1385,7 +1975,7 @@ function renderCalendar(){
       const d = parseISO(dateISO);
       const out = monthCtx ? (d.getMonth()!==monthCtx.monthIndex || d.getFullYear()!==monthCtx.year) : false;
 
-      const dueExpenses = visible(state.db.expenses)
+      const dueExpenses = expenseItems()
         .filter(e=>e.dueDate===dateISO)
         .map(e=>{
           const st = expenseStatus(e);
@@ -1573,7 +2163,7 @@ function renderVendors(){
 function renderBalances(){
   const q = filters.balances || "";
   const vendors = visible(state.db.vendors);
-  const expenses = visible(state.db.expenses);
+  const expenses = expenseItems();
 
   const rows = vendors.map(v=>{
     const vendExpenses = expenses.filter(e=>e.vendorId===v.id);
@@ -1761,7 +2351,7 @@ function renderConfig(){
 $("#btnSync").onclick = async ()=>boot(true);
 $("#btnSave").onclick = async ()=>{
   if(state.pushTimer) clearTimeout(state.pushTimer);
-  await autoPush(true);
+  await autoPush();
 };
 
 /* ---------------- Start ---------------- */

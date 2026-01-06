@@ -1,9 +1,46 @@
 {
   "schemaVersion": 2,
+  "project": {
+    "name": "NUEVO PROYECTO",
+    "currency": "ARS",
+    "startDate": "",
+    "notes": "",
+    "theme": {
+      "accent": "#9ad3ff"
+    }
+  },
+  "catalog": {
+    "departments": [
+      "Producción",
+      "Dirección",
+      "Foto",
+      "Arte",
+      "Vestuario",
+      "Maquillaje",
+      "Sonido",
+      "Eléctrica",
+      "Grip",
+      "Post",
+      "VFX",
+      "Música"
+    ],
+    "paymentMethods": [
+      "Transferencia",
+      "Efectivo",
+      "Tarjeta",
+      "Cheque",
+      "Otro"
+    ]
+  },
+  "vendors": [],
+  "budget": [],
+  "expenses": [],
+  "paymentLines": [],
+  "documents": [],
   "_meta": {
     "revision": 0,
     "updatedAt": "",
-    "updatedBy": ""
+    "deviceId": ""
   },
   "_tombstones": {
     "vendors": {},
@@ -11,38 +48,5 @@
     "expenses": {},
     "paymentLines": {},
     "documents": {}
-  },
-  "project": {
-    "name": "Producción sin nombre",
-    "currency": "ARS",
-    "startDate": "2025-12-22",
-    "numDays": 10,
-    "company": "Gran Berta S.R.L."
-  },
-  "catalog": {
-    "departments": [
-      "Producción",
-      "Dirección",
-      "Foto / Cámara",
-      "Eléctrica / Grip",
-      "Arte",
-      "Vestuario",
-      "Maquillaje",
-      "Sonido",
-      "Locaciones / Permisos",
-      "Transporte",
-      "Catering",
-      "Casting",
-      "Post / Edición",
-      "VFX",
-      "Música / SFX",
-      "Seguros / Legales",
-      "Otros"
-    ]
-  },
-  "vendors": [],
-  "budget": [],
-  "expenses": [],
-  "paymentLines": [],
-  "documents": []
+  }
 }

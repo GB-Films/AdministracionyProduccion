@@ -203,3 +203,24 @@ dialog{
   border-style:dashed;
   border-color:rgba(110,168,255,.5);
 }
+
+/* ---------------- Presupuesto / Gastos reales: categorías + drag ---------------- */
+.dragCell{width:38px}
+.dragHandle{
+  display:inline-flex;
+  width:28px;height:28px;
+  align-items:center;justify-content:center;
+  border:1px solid var(--line);
+  border-radius:10px;
+  background:rgba(255,255,255,.03);
+  cursor:grab;
+  user-select:none;
+}
+.dragHandle[draggable="false"]{opacity:.35;cursor:not-allowed}
+.dragHandle:active{cursor:grabbing}
+.mutedHandle{border-color:transparent;background:transparent;cursor:default}
+.catRow td{background:rgba(255,255,255,.02)}
+.catTitle{display:flex;align-items:center;gap:10px}
+.catText{display:flex;flex-direction:column;gap:2px}
+.catName{font-weight:900;letter-spacing:.2px}
+.dropHintRow td{outline:2px dashed rgba(110,168,255,.6);outline-offset:-4px}
