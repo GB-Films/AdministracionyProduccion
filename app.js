@@ -1,4 +1,4 @@
-/* LA CASONA - Admin. v8
+/* LA CASONA - Admin. vNext
    - expenses = obligaciones (gasto total, con vencimiento)
    - paymentLines = pagos reales (parciales permitidos)
    - calendario real (mes/semana/día) con drag&drop para mover dueDate
@@ -533,6 +533,12 @@ function matchQuery(q, ...fields){
   return fields.join(" ").toLowerCase().includes(q);
 }
 
+function normId(v){ return String(v==null ? "" : v).trim(); }
+function findCostCategory(id){
+  const sid = normId(id);
+  return (state.db.costCategories||[]).find(c => c && c.deleted!==true && normId(c.id)===sid) || null;
+}
+
 /* ---------------- Categorías + orden (Presupuesto / Gastos reales) ---------------- */
 function isCatRow(r){ return !!(r && typeof r==="object" && r.kind==="cat"); }
 function budgetItems(){ return visible(state.db.budget).filter(r=>!isCatRow(r)); }
@@ -551,40 +557,6 @@ function effCostGroupId(it, catsById){
   const gid = String(it?.groupId||"").trim();
   if(gid && catsById[gid]) return gid;
   return DEFAULT_COST_CATEGORY_ID;
-}
-
-function normKeySimple(s){
-  return String(s||"")
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g,"");
-}
-function findCostCategoryByIdLoose(id){
-  const key = String(id||"").trim();
-  if(!key) return null;
-  const cats = state.db?.costCategories || [];
-  return cats.find(c=>c && c.deleted!==true && String(c.id||"").trim()===key) || null;
-}
-function findCostCategoryByNameLoose(name, orderMaybe){
-  const nk = normKeySimple(name);
-  if(!nk) return null;
-  const cats = (state.db?.costCategories||[]).filter(c=>c && c.deleted!==true);
-  if(Number.isFinite(orderMaybe)){
-    const o = Number(orderMaybe);
-    const exact = cats.find(c=>normKeySimple(c.name)===nk && Number(c.order||0)===o);
-    if(exact) return exact;
-  }
-  return cats.find(c=>normKeySimple(c.name)===nk) || null;
-}
-function resolveCostCategoryFromBtn(btn, datasetKey){
-  const id = String(btn?.dataset?.[datasetKey] || btn?.dataset?.id || "").trim();
-  const name = String(btn?.dataset?.catname || "").trim();
-  const orderRaw = btn?.dataset?.catorder;
-  const order = (orderRaw==null || orderRaw==="") ? NaN : Number(orderRaw);
-  let rec = findCostCategoryByIdLoose(id);
-  if(!rec && name) rec = findCostCategoryByNameLoose(name, order);
-  return rec;
 }
 
 function sortByOrder(a,b){
@@ -1270,7 +1242,7 @@ function renderBudget(){
         </td>
         <td colspan="8">
           <div class="catTitle">
-            <button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${cat.id}" data-catname="${escapeHtml(cat.name||"")}" data-catorder="${Number(cat.order||0)}">${caret}</button>
+            <button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${cat.id}">${caret}</button>
             <div class="catText">
               <div class="catName">${escapeHtml(cat.name||"Categoría")}</div>
               <div class="small">${count} ítems · $ ${money(sum)}</div>
@@ -1279,8 +1251,8 @@ function renderBudget(){
         </td>
         <td class="actionsCell">
           <div class="actions">
-            <button class="iconbtn accent" title="Editar" data-editcat="${cat.id}" data-catname="${escapeHtml(cat.name||"")}" data-catorder="${Number(cat.order||0)}">${ICON.edit}</button>
-            ${canDelete ? `<button class="iconbtn danger" title="Borrar" data-delcat="${cat.id}" data-catname="${escapeHtml(cat.name||"")}" data-catorder="${Number(cat.order||0)}">${ICON.trash}</button>` : ``}
+            <button class="iconbtn accent" title="Editar" data-editcat="${cat.id}">${ICON.edit}</button>
+            ${canDelete ? `<button class="iconbtn danger" title="Borrar" data-delcat="${cat.id}">${ICON.trash}</button>` : ``}
           </div>
         </td>
       </tr>`;
@@ -1298,6 +1270,7 @@ function renderBudget(){
         <div class="row" style="min-width:520px;justify-content:flex-end">
           ${renderSearch("budget","Buscar depto / rubro / descripción / proveedor / categoría…")}
           <button class="btn" id="btnImport">Importar Excel</button>
+          <button class="btn danger" id="btnResetBudget" title="Borrar todo el Presupuesto">Reset</button>
           <button class="btn" id="btnAddCat">+ Categoría</button>
           <button class="btn" id="btnAdd">+ Ítem</button>
         </div>
@@ -1333,6 +1306,8 @@ function renderBudget(){
   $("#btnAddCat").onclick = ()=>openBudgetCatDialog(null);
   const btnImp = $("#btnImport");
   if(btnImp) btnImp.onclick = ()=>startBudgetImport();
+  const btnReset = $("#btnResetBudget");
+  if(btnReset) btnReset.onclick = ()=>openBudgetResetDialog();
 
   // Ítems
   view.querySelectorAll("[data-del]").forEach(btn=>{
@@ -1354,26 +1329,26 @@ function renderBudget(){
   // Categorías
   view.querySelectorAll("[data-editcat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const rec = resolveCostCategoryFromBtn(btn, "editcat");
+      const rec = findCostCategory(btn.dataset.editcat);
       if(rec) openBudgetCatDialog(rec);
     };
   });
   view.querySelectorAll("[data-delcat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const cat = resolveCostCategoryFromBtn(btn, "delcat");
+      const cat = findCostCategory(btn.dataset.delcat);
       if(!cat) return;
       if(cat.isDefault===true || cat.id===DEFAULT_COST_CATEGORY_ID) return;
       if(!confirmDelete(`la categoría "${cat.name||"sin nombre"}"`)) return;
 
       // Los ítems pasan a la categoría default (en ambos: presupuesto + gastos reales)
       for(const it of state.db.budget){
-        if(it && it.deleted!==true && !isCatRow(it) && String(it.groupId||"").trim()===String(cat.id||"").trim()){
+        if(it && it.deleted!==true && !isCatRow(it) && normId(it.groupId)===normId(cat.id)){
           it.groupId = DEFAULT_COST_CATEGORY_ID;
           it.updatedAt = nowISO();
         }
       }
       for(const it of state.db.expenses){
-        if(it && it.deleted!==true && !isCatRow(it) && String(it.groupId||"").trim()===String(cat.id||"").trim()){
+        if(it && it.deleted!==true && !isCatRow(it) && normId(it.groupId)===normId(cat.id)){
           it.groupId = DEFAULT_COST_CATEGORY_ID;
           it.updatedAt = nowISO();
         }
@@ -1387,7 +1362,7 @@ function renderBudget(){
   });
   view.querySelectorAll("[data-togglecat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const cat = resolveCostCategoryFromBtn(btn, "togglecat");
+      const cat = findCostCategory(btn.dataset.togglecat);
       if(!cat) return;
       cat.collapsedBudget = !cat.collapsedBudget;
       cat.updatedAt = nowISO();
@@ -1477,17 +1452,62 @@ function renderBudget(){
   }
 
   function reorderCostCategory(movingId, targetId){
-    if(movingId===targetId) return;
+    movingId = normId(movingId);
+    targetId = normId(targetId);
+    if(!movingId || !targetId || movingId===targetId) return;
     const catsNow = visible(state.db.costCategories).sort(sortByOrder);
-    const moving = catsNow.find(c=>c.id===movingId);
-    const target = catsNow.find(c=>c.id===targetId);
+    const moving = catsNow.find(c=>normId(c.id)===movingId);
+    const target = catsNow.find(c=>normId(c.id)===targetId);
     if(!moving || !target) return;
 
-    const arr = catsNow.filter(c=>c.id!==movingId);
-    const idx = arr.findIndex(c=>c.id===targetId);
+    const arr = catsNow.filter(c=>normId(c.id)!==movingId);
+    const idx = arr.findIndex(c=>normId(c.id)===targetId);
     if(idx<0) arr.push(moving);
     else arr.splice(idx,0,moving);
     renumberOrders(arr);
+  }
+
+
+  function openBudgetResetDialog(){
+    openDialog("Borrar TODO el Presupuesto", `
+      <div class="small">
+        Esto borra <b>todas</b> las filas del Presupuesto. También elimina categorías que no estén usadas en "Gastos reales".
+        <br/>Esta acción no se puede deshacer (pero siempre podés reimportar tu Excel).
+      </div>
+      <div class="grid2" style="margin-top:10px">
+        <div><label for="d_confirmReset">Escribí BORRAR para confirmar</label><input id="d_confirmReset" placeholder="BORRAR"/></div>
+      </div>
+    `, ()=>{
+      const txt = ($("#d_confirmReset").value||"").trim().toUpperCase();
+      if(txt !== "BORRAR") throw new Error("Confirmación incorrecta. No se borró nada.");
+
+      // 1) borra filas de presupuesto (incluye legacy rows si existieran)
+      for(const r of (state.db.budget||[])){
+        if(!r || typeof r!=="object" || r.deleted===true) continue;
+        r.deleted = true;
+        r.updatedAt = nowISO();
+      }
+
+      // 2) elimina categorías que no se usan en gastos reales (default no se toca)
+      const usedByExpenses = new Set();
+      for(const e of (state.db.expenses||[])){
+        if(!e || typeof e!=="object" || e.deleted===true || isCatRow(e)) continue;
+        const gid = normId(e.groupId) || DEFAULT_COST_CATEGORY_ID;
+        usedByExpenses.add(gid);
+      }
+
+      for(const c of (state.db.costCategories||[])){
+        if(!c || typeof c!=="object" || c.deleted===true) continue;
+        const cid = normId(c.id);
+        if(c.isDefault===true || cid===DEFAULT_COST_CATEGORY_ID) continue;
+        if(usedByExpenses.has(cid)) continue;
+        c.deleted = true;
+        c.updatedAt = nowISO();
+      }
+
+      setDirty(true);
+      route({preserveFocus:false});
+    });
   }
 
   function openBudgetCatDialog(rec){
@@ -1938,7 +1958,7 @@ function renderExpenses(){
         </td>
         <td colspan="10">
           <div class="catTitle">
-            <button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${cat.id}" data-catname="${escapeHtml(cat.name||"")}" data-catorder="${Number(cat.order||0)}">${caret}</button>
+            <button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${cat.id}">${caret}</button>
             <div class="catText">
               <div class="catName">${escapeHtml(cat.name||"Categoría")}</div>
               <div class="small">${count} gastos · $ ${money(sum)}</div>
@@ -1947,8 +1967,8 @@ function renderExpenses(){
         </td>
         <td class="actionsCell">
           <div class="actions">
-            <button class="iconbtn accent" title="Editar" data-editcat="${cat.id}" data-catname="${escapeHtml(cat.name||"")}" data-catorder="${Number(cat.order||0)}">${ICON.edit}</button>
-            ${canDelete ? `<button class="iconbtn danger" title="Borrar" data-delcat="${cat.id}" data-catname="${escapeHtml(cat.name||"")}" data-catorder="${Number(cat.order||0)}">${ICON.trash}</button>` : ``}
+            <button class="iconbtn accent" title="Editar" data-editcat="${cat.id}">${ICON.edit}</button>
+            ${canDelete ? `<button class="iconbtn danger" title="Borrar" data-delcat="${cat.id}">${ICON.trash}</button>` : ``}
           </div>
         </td>
       </tr>`;
@@ -2031,25 +2051,25 @@ function renderExpenses(){
   // Categorías
   view.querySelectorAll("[data-editcat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const rec = resolveCostCategoryFromBtn(btn, "editcat");
+      const rec = findCostCategory(btn.dataset.editcat);
       if(rec) openExpenseCatDialog(rec);
     };
   });
   view.querySelectorAll("[data-delcat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const cat = resolveCostCategoryFromBtn(btn, "delcat");
+      const cat = findCostCategory(btn.dataset.delcat);
       if(!cat) return;
       if(cat.isDefault===true || cat.id===DEFAULT_COST_CATEGORY_ID) return;
       if(!confirmDelete(`la categoría "${cat.name||"sin nombre"}"`)) return;
 
       for(const it of state.db.budget){
-        if(it && it.deleted!==true && !isCatRow(it) && String(it.groupId||"").trim()===String(cat.id||"").trim()){
+        if(it && it.deleted!==true && !isCatRow(it) && normId(it.groupId)===normId(cat.id)){
           it.groupId = DEFAULT_COST_CATEGORY_ID;
           it.updatedAt = nowISO();
         }
       }
       for(const it of state.db.expenses){
-        if(it && it.deleted!==true && !isCatRow(it) && String(it.groupId||"").trim()===String(cat.id||"").trim()){
+        if(it && it.deleted!==true && !isCatRow(it) && normId(it.groupId)===normId(cat.id)){
           it.groupId = DEFAULT_COST_CATEGORY_ID;
           it.updatedAt = nowISO();
         }
@@ -2063,7 +2083,7 @@ function renderExpenses(){
   });
   view.querySelectorAll("[data-togglecat]").forEach(btn=>{
     btn.onclick = ()=>{
-      const cat = resolveCostCategoryFromBtn(btn, "togglecat");
+      const cat = findCostCategory(btn.dataset.togglecat);
       if(!cat) return;
       cat.collapsedExpenses = !cat.collapsedExpenses;
       cat.updatedAt = nowISO();
@@ -2151,14 +2171,16 @@ function renderExpenses(){
   }
 
   function reorderCostCategory(movingId, targetId){
-    if(movingId===targetId) return;
+    movingId = normId(movingId);
+    targetId = normId(targetId);
+    if(!movingId || !targetId || movingId===targetId) return;
     const catsNow = visible(state.db.costCategories).sort(sortByOrder);
-    const moving = catsNow.find(c=>c.id===movingId);
-    const target = catsNow.find(c=>c.id===targetId);
+    const moving = catsNow.find(c=>normId(c.id)===movingId);
+    const target = catsNow.find(c=>normId(c.id)===targetId);
     if(!moving || !target) return;
 
-    const arr = catsNow.filter(c=>c.id!==movingId);
-    const idx = arr.findIndex(c=>c.id===targetId);
+    const arr = catsNow.filter(c=>normId(c.id)!==movingId);
+    const idx = arr.findIndex(c=>normId(c.id)===targetId);
     if(idx<0) arr.push(moving);
     else arr.splice(idx,0,moving);
     renumberOrders(arr);
