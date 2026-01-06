@@ -309,3 +309,5 @@ dialog{
 .catText{display:flex;flex-direction:column;gap:2px}
 .catName{font-weight:900;letter-spacing:.2px}
 .dropHintRow td{outline:2px dashed rgba(110,168,255,.6);outline-offset:-4px}
+
+.descCell{max-width:320px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--txt)}

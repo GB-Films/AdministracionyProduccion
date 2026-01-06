@@ -90,6 +90,69 @@ function escapeHtml(s){ return String(s||"").replaceAll("&","&amp;").replaceAll(
 function plusDaysISO(iso,days){ const d=parseISO(iso); if(!d) return ""; d.setDate(d.getDate()+days); return d.toISOString().slice(0,10); }
 function confirmDelete(label="este ítem"){ return window.confirm(`¿Borrar ${label}? Esta acción no se puede deshacer.`); }
 
+/* -------- Import helpers (Excel) -------- */
+function normKey(s){
+  try{
+    return String(s||"").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+  }catch{
+    return String(s||"").trim().toLowerCase();
+  }
+}
+function shortText(s, max=56){
+  const t = String(s||"").trim();
+  if(t.length<=max) return t;
+  return t.slice(0, Math.max(0, max-1)) + "…";
+}
+function parseFlexNumber(v){
+  if(v===null || v===undefined || v==="") return 0;
+  if(typeof v==="number") return v;
+  let t = String(v).trim();
+  if(!t) return 0;
+  // limpia moneda / texto raro
+  t = t.replace(/\s+/g,"").replace(/[^0-9,\.\-]/g,"");
+  const lastComma = t.lastIndexOf(",");
+  const lastDot = t.lastIndexOf(".");
+  if(lastComma>-1 && lastDot>-1){
+    if(lastComma>lastDot){
+      t = t.replace(/\./g,"").replace(",",".");
+    }else{
+      t = t.replace(/,/g,"");
+    }
+  }else if(lastComma>-1){
+    t = t.replace(/\./g,"").replace(",",".");
+  }
+  const n = parseFloat(t);
+  return Number.isFinite(n) ? n : 0;
+}
+async function readSpreadsheetRows(file){
+  if(!file) return [];
+  if(!window.XLSX) throw new Error("No encontré la librería XLSX. Probá recargar la página (necesita internet).");
+  const name = String(file.name||"").toLowerCase();
+  if(name.endsWith(".csv")){
+    const text = await file.text();
+    const wb = XLSX.read(text, { type:"string" });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    return XLSX.utils.sheet_to_json(ws, { defval:"" });
+  }else{
+    const ab = await file.arrayBuffer();
+    const wb = XLSX.read(ab, { type:"array" });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    return XLSX.utils.sheet_to_json(ws, { defval:"" });
+  }
+}
+function pickRowField(row, aliases){
+  const keys = Object.keys(row||{});
+  for(const k of keys){
+    const nk = normKey(k);
+    for(const a of aliases){
+      const na = normKey(a);
+      if(nk === na || nk.includes(na)) return row[k];
+    }
+  }
+  return "";
+}
+
+
 const ICON = { trash:"🗑️", edit:"✏️", pay:"💸" };
 
 /* Focus preservation (para buscadores al re-render) */
@@ -1153,6 +1216,7 @@ function renderBudget(){
         <td class="dragCell"><span class="dragHandle" draggable="${canDnD}" data-drag="budget-item" data-id="${b.id}" title="${canDnD?"Arrastrar":"Desactivado con búsqueda"}">↕</span></td>
         <td>${escapeHtml(b.department||"—")}</td>
         <td>${escapeHtml(b.category||"—")}</td>
+        <td class="descCell" title="${tip}">${escapeHtml(shortText(b.description||"")) || "—"}</td>
         <td>${escapeHtml(vendorName)}</td>
         <td>${escapeHtml(b.unitType||"—")}</td>
         <td>${Number(b.units||0)}</td>
@@ -1176,7 +1240,7 @@ function renderBudget(){
         <td class="dragCell">
           <span class="dragHandle" draggable="${canDnD}" data-drag="budget-cat" data-id="${cat.id}" title="${canDnD?"Arrastrar categoría":"Desactivado con búsqueda"}">↕</span>
         </td>
-        <td colspan="7">
+        <td colspan="8">
           <div class="catTitle">
             <button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${cat.id}">${caret}</button>
             <div class="catText">
@@ -1205,6 +1269,8 @@ function renderBudget(){
         </div>
         <div class="row" style="min-width:520px;justify-content:flex-end">
           ${renderSearch("budget","Buscar depto / rubro / proveedor / categoría…")}
+          <button class="btn" id="btnImport">Importar Excel</button>
+          <input type="file" id="budgetImportFile" accept=".xlsx,.xls,.csv" style="display:none" />
           <button class="btn" id="btnAddCat">+ Categoría</button>
           <button class="btn" id="btnAdd">+ Ítem</button>
         </div>
@@ -1216,7 +1282,7 @@ function renderBudget(){
         <thead>
           <tr>
             <th style="width:38px"></th>
-            <th>Depto</th><th>Rubro</th><th>Proveedor</th><th>Tipo unidad</th><th>Unidades</th><th>$ Unitario</th><th>$ Total</th>
+            <th>Depto</th><th>Rubro</th><th>Descripción</th><th>Proveedor</th><th>Tipo unidad</th><th>Unidades</th><th>$ Unitario</th><th>$ Total</th>
             <th class="actionsCell"></th>
           </tr>
         </thead>
@@ -1235,6 +1301,178 @@ function renderBudget(){
   `;
 
   attachSearch("budget");
+  // Importar Excel
+  const fileInput = $("#budgetImportFile");
+  const btnImport = $("#btnImport");
+  if(btnImport && fileInput){
+    btnImport.onclick = ()=>fileInput.click();
+    fileInput.onchange = async ()=>{
+      const file = fileInput.files?.[0];
+      fileInput.value = "";
+      if(!file) return;
+      try{
+        const rows = await readSpreadsheetRows(file);
+        if(!rows.length) throw new Error("El archivo está vacío.");
+        const keys0 = Object.keys(rows[0]||{});
+        if(keys0.some(k=>String(k||"").startsWith("__EMPTY"))){
+          throw new Error("El Excel necesita encabezados (fila 1). Ej: Categoria, Depto, Rubro, Proveedor, Tipo unidad, Unidades, Unitario, Descripción.");
+        }
+
+        const parsed = [];
+        for(const r of rows){
+          const groupName = String(pickRowField(r, ["Categoría","Categoria","Grupo","Category","Group"])||"").trim();
+          const department = String(pickRowField(r, ["Depto","Departamento","Dept","Department"])||"").trim();
+          const rubro = String(pickRowField(r, ["Rubro","Item","Concepto","Concept","Servicio"])||"").trim();
+          const vendorName = String(pickRowField(r, ["Proveedor","Vendor","Proveedor/Empresa","Empresa"])||"").trim();
+          const unitType = String(pickRowField(r, ["Tipo unidad","Tipo","Unidad","Unit type","Unit"])||"").trim();
+          const unitsRaw = pickRowField(r, ["Unidades","Cantidad","Qty","Units"]);
+          const unitCostRaw = pickRowField(r, ["Unitario","Costo unitario","Precio unitario","$ Unitario","Unit cost","Unit price","Precio"]);
+          const description = String(pickRowField(r, ["Descripción","Descripcion","Detalle","Notas","Nota","Description"])||"").trim();
+
+          const units = parseFlexNumber(unitsRaw);
+          const unitCost = parseFlexNumber(unitCostRaw);
+
+          const hasAny = groupName || department || rubro || vendorName || unitType || description || units || unitCost;
+          if(!hasAny) continue;
+
+          parsed.push({
+            groupName,
+            department: department || "Otros",
+            category: rubro,
+            vendorName,
+            unitType,
+            units,
+            unitCost,
+            description
+          });
+        }
+
+        if(!parsed.length) throw new Error("No encontré filas importables (¿encabezados correctos?).");
+
+        // Pre-cálculo de altas
+        const catsNow = visibleCostCategories();
+        const catNameToId = new Map(catsNow.map(c=>[normKey(c.name), c.id]));
+        catNameToId.set(normKey("default"), DEFAULT_COST_CATEGORY_ID);
+
+        const newCats = new Map(); // normName -> display
+        for(const p of parsed){
+          const n = normKey(p.groupName);
+          if(!n || n===normKey("default")) continue;
+          if(!catNameToId.has(n)) newCats.set(n, p.groupName);
+        }
+
+        const vendorsNow = visible(state.db.vendors);
+        const vendorNameToId = new Map(vendorsNow.map(v=>[normKey(v.name), v.id]));
+        const newVendors = new Map();
+        for(const p of parsed){
+          const n = normKey(p.vendorName);
+          if(!n) continue;
+          if(!vendorNameToId.has(n)) newVendors.set(n, p.vendorName);
+        }
+
+        const sample = parsed.slice(0,6).map(p=>`
+          <tr>
+            <td>${escapeHtml(p.groupName||"(Default)")}</td>
+            <td>${escapeHtml(p.department||"")}</td>
+            <td>${escapeHtml(p.category||"")}</td>
+            <td>${escapeHtml(p.vendorName||"")}</td>
+            <td>$ ${money(p.units*p.unitCost)}</td>
+          </tr>
+        `).join("");
+
+        openDialog("Importar Excel (Presupuesto)", `
+          <div class="small">
+            Archivo: <b>${escapeHtml(file.name)}</b><br/>
+            Filas importables: <b>${parsed.length}</b><br/>
+            Nuevas categorías: <b>${newCats.size}</b> · Nuevos proveedores: <b>${newVendors.size}</b>
+          </div>
+
+          <div style="height:10px"></div>
+
+          <div class="card" style="margin:0">
+            <div class="small" style="margin-bottom:8px">Muestra (primeras ${Math.min(6,parsed.length)} filas)</div>
+            <table>
+              <thead><tr><th>Categoría</th><th>Depto</th><th>Rubro</th><th>Proveedor</th><th>Total</th></tr></thead>
+              <tbody>${sample}</tbody>
+            </table>
+          </div>
+
+          <div style="height:10px"></div>
+          <div class="small">Importa como <b>nuevos ítems</b> (no reemplaza existentes).</div>
+        `, ()=>{
+          // 1) Crear categorías faltantes
+          let maxCatOrder = Math.max(0, ...catsNow.map(c=>Number(c.order||0)));
+          for(const [n, display] of newCats.entries()){
+            maxCatOrder += 1000;
+            const id = uid("cc");
+            state.db.costCategories.push({
+              id,
+              name: display || "Categoría",
+              order: maxCatOrder,
+              isDefault:false,
+              collapsedBudget:false,
+              collapsedExpenses:false,
+              updatedAt: nowISO(),
+              deleted:false
+            });
+            catNameToId.set(n, id);
+          }
+
+          // 2) Crear proveedores faltantes
+          for(const [n, display] of newVendors.entries()){
+            const id = uid("v");
+            state.db.vendors.push({ id, name: display, updatedAt: nowISO(), deleted:false });
+            vendorNameToId.set(n, id);
+          }
+
+          // 3) Insertar ítems con order al final por grupo
+          const catsById = costCatsById();
+          const eff = (it)=> effCostGroupId(it, catsById);
+          const maxOrderByGroup = {};
+          for(const it of visible(state.db.budget)){
+            if(isCatRow(it)) continue;
+            const gid = eff(it);
+            maxOrderByGroup[gid] = Math.max(Number(maxOrderByGroup[gid]||0), Number(it.order||0));
+          }
+
+          for(const p of parsed){
+            const gNorm = normKey(p.groupName);
+            let groupId = DEFAULT_COST_CATEGORY_ID;
+            if(gNorm && catNameToId.has(gNorm)) groupId = catNameToId.get(gNorm);
+            const vNorm = normKey(p.vendorName);
+            const vendorId = vNorm ? (vendorNameToId.get(vNorm) || "") : "";
+
+            const gidEff = (groupId && catsById[groupId]) ? groupId : DEFAULT_COST_CATEGORY_ID;
+            const next = (maxOrderByGroup[gidEff]||0) + 1000;
+            maxOrderByGroup[gidEff] = next;
+
+            state.db.budget.push({
+              id: uid("b"),
+              updatedAt: nowISO(),
+              deleted:false,
+              groupId: gidEff,
+              order: next,
+              department: p.department || "Otros",
+              category: p.category || "",
+              vendorId,
+              unitType: p.unitType || "",
+              units: Number(p.units||0),
+              unitCost: Number(p.unitCost||0),
+              description: p.description || ""
+            });
+          }
+
+          setDirty(true);
+          route({preserveFocus:false});
+        });
+
+      }catch(e){
+        alert(e.message || e);
+      }
+    };
+  }
+
+
 
   $("#btnAdd").onclick = ()=>openBudgetItemDialog(null);
   $("#btnAddCat").onclick = ()=>openBudgetCatDialog(null);
@@ -1456,7 +1694,7 @@ function renderBudget(){
         <div><label for="d_order">Orden</label><input id="d_order" type="number" step="1" value="${Number(rec?.order||0)}" placeholder="(auto)"/></div>
       </div>
 
-      <div><label for="d_description">Descripción (hover)</label><textarea id="d_description">${escapeHtml(rec?.description||"")}</textarea></div>
+      <div><label for="d_description">Descripción</label><textarea id="d_description">${escapeHtml(rec?.description||"")}</textarea></div>
     `, ()=>{
       const payload = {
         groupId: $("#d_group").value || DEFAULT_COST_CATEGORY_ID,
