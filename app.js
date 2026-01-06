@@ -87,6 +87,41 @@ function formatDate(s){
 }
 function money(n){ return Number(n||0).toLocaleString("es-AR",{maximumFractionDigits:2}); }
 function escapeHtml(s){ return String(s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
+
+// Colores por Depto (para mejorar lectura)
+const DEPT_PALETTE = ["#6EA8FF","#56F08A","#FFD28A","#FF6B6B","#BA68C8","#4DB6AC","#90A4AE","#FFB74D","#81C784","#64B5F6"];
+function hashStr(s){
+  s = String(s||"");
+  let h = 0;
+  for(let i=0;i<s.length;i++){ h = ((h<<5)-h) + s.charCodeAt(i); h |= 0; }
+  return Math.abs(h);
+}
+function deptColor(dept){
+  const d = String(dept||"").trim();
+  if(!d || d==="—") return "#90A4AE";
+  const list = state.db?.catalog?.departments || [];
+  const idx = list.indexOf(d);
+  const i = (idx>=0 ? idx : hashStr(d)) % DEPT_PALETTE.length;
+  return DEPT_PALETTE[i];
+}
+function rgbaFromHex(hex, a){
+  const h = String(hex||"").replace("#","").trim();
+  if(h.length===3){
+    const r=parseInt(h[0]+h[0],16), g=parseInt(h[1]+h[1],16), b=parseInt(h[2]+h[2],16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+  if(h.length===6){
+    const r=parseInt(h.slice(0,2),16), g=parseInt(h.slice(2,4),16), b=parseInt(h.slice(4,6),16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+  return `rgba(144,164,174,${a})`;
+}
+function deptPill(dept){
+  const label = String(dept||"—");
+  const c = deptColor(label);
+  const bg = rgbaFromHex(c, 0.16);
+  return `<span class="deptPill" style="--c:${c};--bg:${bg}">${escapeHtml(label||"—")}</span>`;
+}
 function plusDaysISO(iso,days){ const d=parseISO(iso); if(!d) return ""; d.setDate(d.getDate()+days); return d.toISOString().slice(0,10); }
 function confirmDelete(label="este ítem"){ return window.confirm(`¿Borrar ${label}? Esta acción no se puede deshacer.`); }
 
@@ -1136,7 +1171,7 @@ function renderDueTable(list){
           return `<tr>
             <td>${formatDate(e.dueDate)}</td>
             <td>${escapeHtml(v)}</td>
-            <td>${escapeHtml(e.concept||"—")}</td>
+            <td class="workCell">${escapeHtml(e.concept||"—")}</td>
             <td>$ ${money(x.rem)}</td>
             <td><span class="badge ${badge}">${label}</span></td>
           </tr>`;
@@ -1212,10 +1247,10 @@ function renderBudget(){
     const total = Number(b.units||0) * Number(b.unitCost||0);
     const tip = escapeHtml(b.description||"");
     return `
-      <tr class="itemRow" title="${tip}" data-drop="budget-item" data-id="${b.id}">
+      <tr class="itemRow" style="--rowc:${deptColor(b.department)}" title="${tip}" data-drop="budget-item" data-id="${b.id}">
         <td class="dragCell"><span class="dragHandle" draggable="${canDnD}" data-drag="budget-item" data-id="${b.id}" title="${canDnD?"Arrastrar":"Desactivado con búsqueda"}">↕</span></td>
-        <td>${escapeHtml(b.department||"—")}</td>
-        <td>${escapeHtml(b.category||"—")}</td>
+        <td>${deptPill(b.department)}</td>
+        <td class="workCell">${escapeHtml(b.category||"—")}</td>
         <td class="descCell" title="${tip}">${escapeHtml(b.description||"—")}</td>
         <td>${escapeHtml(vendorName)}</td>
         <td>${escapeHtml(b.unitType||"—")}</td>
@@ -1266,7 +1301,7 @@ function renderBudget(){
     const catsByIdNow = costCatsById();
     const arr = visible(state.db.budget)
       .filter(it=>!isCatRow(it) && effCostGroupId(it, catsByIdNow)===gid);
-    arr.sort((a,b)=>(deptIndex(a.department)-deptIndex(b.department)) ||
+    arr.sort((a,b)=> String(a.department||"").localeCompare(String(b.department||""), undefined, { sensitivity:"base" }) ||
       String(a.category||"").localeCompare(String(b.category||""), undefined, { sensitivity:"base" }));
     let i=1;
     for(const it of arr){
@@ -1385,6 +1420,14 @@ function renderBudget(){
       sortBudgetItemsInCategory(cat.id);
     };
   });
+  view.querySelectorAll("[data-sortcat-exp]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const cat = findCostCategory(btn.dataset.sortcatExp);
+      if(!cat) return;
+      sortExpenseItemsInCategory(cat.id);
+    };
+  });
+
   view.querySelectorAll("[data-togglecat]").forEach(btn=>{
     btn.onclick = ()=>{
       const cat = findCostCategory(btn.dataset.togglecat);
@@ -1953,12 +1996,12 @@ function renderExpenses(){
     const badge = statusBadgeClass(st, e.dueDate);
 
     return `
-      <tr class="itemRow" data-drop="exp-item" data-id="${e.id}">
+      <tr class="itemRow" style="--rowc:${deptColor(e.department)}" data-drop="exp-item" data-id="${e.id}">
         <td class="dragCell"><span class="dragHandle" draggable="${canDnD}" data-drag="exp-item" data-id="${e.id}" title="${canDnD?"Arrastrar":"Desactivado con búsqueda"}">↕</span></td>
         <td>${formatDate(e.date)}</td>
         <td>${escapeHtml(vendorName)}</td>
-        <td>${escapeHtml(e.department||"—")}</td>
-        <td>${escapeHtml(e.concept||"—")}</td>
+        <td>${deptPill(e.department)}</td>
+        <td class="workCell">${escapeHtml(e.concept||"—")}</td>
         <td>${escapeHtml(e.paymentMethod||"—")}</td>
         <td>$ ${money(e.amount||0)}</td>
         <td>${formatDate(e.serviceDate)}</td>
@@ -1996,6 +2039,7 @@ function renderExpenses(){
         </td>
         <td class="actionsCell">
           <div class="actions">
+            <button class="iconbtn" title="Ordenar gastos por Depto y Trabajo" data-sortcat-exp="${cat.id}">⇅</button>
             <button class="iconbtn accent" title="Editar" data-editcat="${cat.id}">${ICON.edit}</button>
             ${canDelete ? `<button class="iconbtn danger" title="Borrar" data-delcat="${cat.id}">${ICON.trash}</button>` : ``}
           </div>
@@ -2004,6 +2048,24 @@ function renderExpenses(){
   };
 
   const sumFor = (arr)=>arr.reduce((s,e)=>s + Number(e.amount||0),0);
+
+  const sortExpenseItemsInCategory = (catId)=>{
+    const gid = normId(catId);
+    const catsByIdNow = costCatsById();
+    const arr = visible(state.db.expenses)
+      .filter(it=>!isCatRow(it) && effCostGroupId(it, catsByIdNow)===gid);
+    arr.sort((a,b)=> String(a.department||"").localeCompare(String(b.department||""), undefined, { sensitivity:"base" }) ||
+      String(a.concept||"").localeCompare(String(b.concept||""), undefined, { sensitivity:"base" }));
+    let i=1;
+    for(const it of arr){
+      it.order = i*1000;
+      it.updatedAt = nowISO();
+      i++;
+    }
+    setDirty(true);
+    route({preserveFocus:false});
+  };
+
 
   view.innerHTML = `
     <div class="card">
@@ -2110,6 +2172,14 @@ function renderExpenses(){
       route({preserveFocus:false});
     };
   });
+  view.querySelectorAll("[data-sortcat-exp]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const cat = findCostCategory(btn.dataset.sortcatExp);
+      if(!cat) return;
+      sortExpenseItemsInCategory(cat.id);
+    };
+  });
+
   view.querySelectorAll("[data-togglecat]").forEach(btn=>{
     btn.onclick = ()=>{
       const cat = findCostCategory(btn.dataset.togglecat);

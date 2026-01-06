@@ -311,8 +311,15 @@ dialog{
 .dragHandle[draggable="false"]{opacity:.35;cursor:not-allowed}
 .dragHandle:active{cursor:grabbing}
 .mutedHandle{border-color:transparent;background:transparent;cursor:default}
-.catRow td{background:rgba(255,255,255,.02)}
+.catRow td{background:linear-gradient(90deg, rgba(110,168,255,.16), rgba(255,255,255,.02));}
 .catTitle{display:flex;align-items:center;gap:10px}
 .catText{display:flex;flex-direction:column;gap:2px}
 .catName{font-weight:900;letter-spacing:.2px}
 .dropHintRow td{outline:2px dashed rgba(110,168,255,.6);outline-offset:-4px}
+
+
+/* Visual: pills por Depto + jerarquía en tablas */
+.deptPill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;border:1px solid var(--c);background:var(--bg);color:var(--c);font-weight:900;font-size:12px;letter-spacing:.1px;white-space:nowrap}
+.workCell{font-weight:900}
+.itemRow{box-shadow: inset 4px 0 0 var(--rowc, rgba(255,255,255,.06));}
+.catRow .catName{text-transform:uppercase;font-size:13px}
