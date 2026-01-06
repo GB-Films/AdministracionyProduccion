@@ -1125,7 +1125,7 @@ function renderDueTable(list){
   const today = todayISO();
   return `
     <table>
-      <thead><tr><th>Vence</th><th>Proveedor</th><th>Concepto</th><th>Saldo</th><th>Estado</th></tr></thead>
+      <thead><tr><th>Vence</th><th>Proveedor</th><th>Trabajo</th><th>Saldo</th><th>Estado</th></tr></thead>
       <tbody>
         ${list.map(x=>{
           const e=x.e;
@@ -1251,6 +1251,7 @@ function renderBudget(){
         </td>
         <td class="actionsCell">
           <div class="actions">
+            <button class="iconbtn" title="Ordenar ítems por Depto y Trabajo" data-sortcat="${cat.id}">⇅</button>
             <button class="iconbtn accent" title="Editar" data-editcat="${cat.id}">${ICON.edit}</button>
             ${canDelete ? `<button class="iconbtn danger" title="Borrar" data-delcat="${cat.id}">${ICON.trash}</button>` : ``}
           </div>
@@ -1260,6 +1261,23 @@ function renderBudget(){
 
   const sumFor = (arr)=>arr.reduce((s,b)=>s + (Number(b.units||0)*Number(b.unitCost||0)),0);
 
+  const sortBudgetItemsInCategory = (catId)=>{
+    const gid = normId(catId);
+    const catsByIdNow = costCatsById();
+    const arr = visible(state.db.budget)
+      .filter(it=>!isCatRow(it) && effCostGroupId(it, catsByIdNow)===gid);
+    arr.sort((a,b)=>(deptIndex(a.department)-deptIndex(b.department)) ||
+      String(a.category||"").localeCompare(String(b.category||""), undefined, { sensitivity:"base" }));
+    let i=1;
+    for(const it of arr){
+      it.order = i*1000;
+      it.updatedAt = nowISO();
+      i++;
+    }
+    setDirty(true);
+    route({preserveFocus:false});
+  };
+
   view.innerHTML = `
     <div class="card">
       <div class="toolbar">
@@ -1268,7 +1286,7 @@ function renderBudget(){
           <div class="small">${canDnD ? "Arrastrá filas para reordenar / mover entre categorías." : "Con búsqueda activa no se puede reordenar (para evitar lío)."}</div>
         </div>
         <div class="row" style="min-width:520px;justify-content:flex-end">
-          ${renderSearch("budget","Buscar depto / rubro / descripción / proveedor / categoría…")}
+          ${renderSearch("budget","Buscar depto / trabajo / descripción / proveedor / categoría…")}
           <button class="btn" id="btnImport">Importar Excel</button>
           <button class="btn danger" id="btnResetBudget" title="Borrar todo el Presupuesto">Reset</button>
           <button class="btn" id="btnAddCat">+ Categoría</button>
@@ -1282,7 +1300,7 @@ function renderBudget(){
         <thead>
           <tr>
             <th style="width:38px"></th>
-            <th>Depto</th><th>Rubro</th><th>Descripción</th><th>Proveedor</th><th>Tipo unidad</th><th>Unidades</th><th>$ Unitario</th><th>$ Total</th>
+            <th>Depto</th><th>Trabajo</th><th>Descripción</th><th>Proveedor</th><th>Tipo unidad</th><th>Unidades</th><th>$ Unitario</th><th>$ Total</th>
             <th class="actionsCell"></th>
           </tr>
         </thead>
@@ -1358,6 +1376,13 @@ function renderBudget(){
 
       setDirty(true);
       route({preserveFocus:false});
+    };
+  });
+  view.querySelectorAll("[data-sortcat]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const cat = findCostCategory(btn.dataset.sortcat);
+      if(!cat) return;
+      sortBudgetItemsInCategory(cat.id);
     };
   });
   view.querySelectorAll("[data-togglecat]").forEach(btn=>{
@@ -1709,7 +1734,7 @@ function importBudgetRows(rows){
 
   const idxGroup = pick(["categoria","grupo","seccion","section","area"]);
   const idxDept  = pick(["depto","departamento","department"]);
-  const idxRubro = pick(["rubro","concepto","item"]);
+  const idxRubro = pick(["trabajo","rubro","concepto","item"]);
   const idxVend  = pick(["proveedor","vendor"]);
   const idxUnitT = pick(["tipo unidad","tipo","unidad","unit type"]);
   const idxUnits = pick(["unidades","cantidad","cant","qty","units"]);
@@ -1802,6 +1827,8 @@ function openBudgetItemDialog(rec){
     const isEdit=!!rec;
     const vendorOpt = vendors.map(v=>`<option value="${v.id}" ${rec?.vendorId===v.id?"selected":""}>${escapeHtml(v.name)}</option>`).join("");
     const deptOpt = departments.map(d=>`<option ${rec?.department===d?"selected":""}>${escapeHtml(d)}</option>`).join("");
+    const pmDefault = (rec?.paymentMethod || state.ui.lastExpensePaymentMethod || "Transferencia");
+    const payMethodOpt = ["Efectivo","Transferencia"].map(m=>`<option ${pmDefault===m?"selected":""}>${m}</option>`).join("");
     const catsNow = visibleCostCategories();
     const catsByIdNow = Object.fromEntries(catsNow.map(c=>[c.id,c]));
     const currGid = rec ? effCostGroupId(rec, catsByIdNow) : DEFAULT_COST_CATEGORY_ID;
@@ -1811,7 +1838,7 @@ function openBudgetItemDialog(rec){
       <div class="grid3">
         <div><label for="d_group">Categoría</label><select id="d_group">${groupOpt}</select></div>
         <div><label for="d_department">Depto</label><select id="d_department">${deptOpt}</select></div>
-        <div><label for="d_category">Rubro</label><input id="d_category" value="${escapeHtml(rec?.category||"")}" placeholder="Ej: Cámara"/></div>
+        <div><label for="d_category">Trabajo</label><input id="d_category" value="${escapeHtml(rec?.category||"")}" placeholder="Ej: Cámara"/></div>
       </div>
 
       <div class="grid3">
@@ -1840,6 +1867,7 @@ function openBudgetItemDialog(rec){
         unitCost: Number($("#d_unitCost").value||0),
         description: $("#d_description").value.trim()
       };
+      state.ui.lastExpensePaymentMethod = payload.paymentMethod;
 
       if(isEdit){
         Object.assign(rec, payload);
@@ -1890,7 +1918,7 @@ function renderExpenses(){
     const itemMatches = itemsAll.filter(e => matchQuery(
       q,
       e.date, e.dueDate, e.serviceDate,
-      e.department, e.concept,
+      e.department, e.concept, e.paymentMethod,
       catsById[e.groupId]?.name||"",
       vendorsById[e.vendorId]?.name||""
     ));
@@ -1931,6 +1959,7 @@ function renderExpenses(){
         <td>${escapeHtml(vendorName)}</td>
         <td>${escapeHtml(e.department||"—")}</td>
         <td>${escapeHtml(e.concept||"—")}</td>
+        <td>${escapeHtml(e.paymentMethod||"—")}</td>
         <td>$ ${money(e.amount||0)}</td>
         <td>${formatDate(e.serviceDate)}</td>
         <td>${formatDate(e.dueDate)}</td>
@@ -1956,7 +1985,7 @@ function renderExpenses(){
         <td class="dragCell">
           <span class="dragHandle" draggable="${canDnD}" data-drag="exp-cat" data-id="${cat.id}" title="${canDnD?"Arrastrar categoría":"Desactivado con búsqueda"}">↕</span>
         </td>
-        <td colspan="10">
+        <td colspan="11">
           <div class="catTitle">
             <button class="iconbtn" title="${collapsed?"Expandir":"Colapsar"}" data-togglecat="${cat.id}">${caret}</button>
             <div class="catText">
@@ -1984,7 +2013,7 @@ function renderExpenses(){
           <div class="small">${canDnD ? "Arrastrá filas para reordenar / mover entre categorías." : "Con búsqueda activa no se puede reordenar."}</div>
         </div>
         <div class="row" style="min-width:520px;justify-content:flex-end">
-          ${renderSearch("expenses","Buscar concepto / proveedor / depto / categoría…")}
+          ${renderSearch("expenses","Buscar trabajo / proveedor / depto / categoría…")}
           <button class="btn" id="btnAddCat">+ Categoría</button>
           <button class="btn" id="btnAdd">+ Gasto</button>
         </div>
@@ -1996,7 +2025,7 @@ function renderExpenses(){
         <thead>
           <tr>
             <th style="width:38px"></th>
-            <th>Fecha</th><th>Proveedor</th><th>Depto</th><th>Concepto</th>
+            <th>Fecha</th><th>Proveedor</th><th>Depto</th><th>Trabajo</th><th>Forma de pago</th>
             <th>Total</th><th>Ejecución</th><th>Vence</th><th>Pagado</th><th>Saldo</th><th>Estado</th>
             <th class="actionsCell"></th>
           </tr>
@@ -2239,7 +2268,8 @@ function renderExpenses(){
 
       <div class="grid3">
         <div><label for="d_department">Depto</label><select id="d_department">${deptOpt}</select></div>
-        <div><label for="d_concept">Concepto</label><input id="d_concept" value="${escapeHtml(rec?.concept||"")}" /></div>
+        <div><label for="d_concept">Trabajo</label><input id="d_concept" value="${escapeHtml(rec?.concept||"")}" /></div>
+        <div><label for="d_paymentMethod">Forma de pago</label><select id="d_paymentMethod">${payMethodOpt}</select></div>
         <div><label for="d_amount">Total ($)</label><input id="d_amount" type="number" step="0.01" value="${Number(rec?.amount||0)}"/></div>
       </div>
 
@@ -2292,6 +2322,7 @@ function renderExpenses(){
         vendorId,
         department: $("#d_department").value,
         concept: $("#d_concept").value.trim(),
+        paymentMethod: $("#d_paymentMethod").value || "Transferencia",
         amount: Number($("#d_amount").value||0),
         serviceDate: $("#d_serviceDate").value,
         dueDate: $("#d_dueDate").value,
@@ -2430,14 +2461,14 @@ function renderPayments(){
           <div class="small">Acá están los pagos reales (incluye parciales).</div>
         </div>
         <div class="row" style="min-width:420px;justify-content:flex-end">
-          ${renderSearch("payments","Buscar proveedor / método / concepto…")}
+          ${renderSearch("payments","Buscar proveedor / método / trabajo…")}
         </div>
       </div>
     </div>
 
     <div class="card">
       <table>
-        <thead><tr><th>Fecha</th><th>Proveedor</th><th>Método</th><th>Concepto</th><th>Monto</th><th>Comprobante</th><th class="actionsCell"></th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Proveedor</th><th>Método</th><th>Trabajo</th><th>Monto</th><th>Comprobante</th><th class="actionsCell"></th></tr></thead>
         <tbody>
           ${list.map(pl=>{
             const vendorName = vendorsById[pl.vendorId]?.name || "—";
@@ -2546,7 +2577,7 @@ function renderCalendar(){
           <button class="btn" id="mWeek">Semana</button>
           <button class="btn" id="mDay">Día</button>
 
-          ${renderSearch("calendar","Buscar proveedor / concepto…")}
+          ${renderSearch("calendar","Buscar proveedor / trabajo…")}
         </div>
       </div>
     </div>
