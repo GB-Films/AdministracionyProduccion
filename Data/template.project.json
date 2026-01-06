@@ -1,5 +1,17 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "_meta": {
+    "revision": 0,
+    "updatedAt": "",
+    "updatedBy": ""
+  },
+  "_tombstones": {
+    "vendors": {},
+    "budget": {},
+    "expenses": {},
+    "paymentLines": {},
+    "documents": {}
+  },
   "project": {
     "name": "Producción sin nombre",
     "currency": "ARS",
@@ -31,7 +43,6 @@
   "vendors": [],
   "budget": [],
   "expenses": [],
-  "payments": [],
-  "documents": [],
-  "audit": []
+  "paymentLines": [],
+  "documents": []
 }

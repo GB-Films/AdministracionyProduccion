@@ -12,7 +12,8 @@ const DEFAULT_ACCESS_KEY = "$2a$10$nzjX1kWtm5vCMZj8qtlSoeP/kUp77ZWnpFE6kWIcnBqe1
 const AUTO_PULL_INTERVAL_MS = 6000;
 const AUTO_PUSH_DEBOUNCE_MS = 1200;
 const DUE_SOON_DAYS = 4;
-const MAX_INLINE_PDF_BYTES = 0; // desactivado para no romper el BIN (413). Usá URL (Drive/Dropbox) si querés adjuntos.
+const MAX_INLINE_PDF_BYTES = 0; // 0 = adjuntos inline desactivados (evita 413). Usá URL (Drive/Dropbox).
+const INLINE_ATTACHMENTS_ENABLED = MAX_INLINE_PDF_BYTES > 0;
 
 const $ = (sel) => document.querySelector(sel);
 const view = $("#view");
@@ -23,6 +24,7 @@ const dlgOk = $("#dlgOk");
 
 const LS_KEY = "lacasona_admin_config_v2";
 const LS_DEVICE = "lacasona_admin_deviceId_v1";
+const LS_DB = "lacasona_admin_db_v2";
 
 const filters = {
   budget:"", expenses:"", vendors:"", calendar:"", payments:"", balances:"", docs:""
@@ -70,6 +72,13 @@ function isFormField(el){
 
 /* ---------------- Basic helpers ---------------- */
 function setStatus(s){ const el=$("#syncStatus"); if(el) el.textContent = s||""; }
+function updateBrand(){
+  const name = state.db?.project?.name || "LA CASONA";
+  const el = $("#brandTitle");
+  if(el) el.textContent = name;
+  document.title = `${name} - Admin.`;
+}
+
 function uid(prefix="id"){ return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,7)}`; }
 function nowISO(){ return new Date().toISOString(); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
@@ -128,6 +137,13 @@ function loadConfig(){
 function saveConfig(cfg){
   localStorage.setItem(LS_KEY, JSON.stringify(cfg));
   state.config = cfg;
+}
+
+function saveLocalDb(db){
+  try{ localStorage.setItem(LS_DB, JSON.stringify(db)); }catch{}
+}
+function loadLocalDb(){
+  try{ return JSON.parse(localStorage.getItem(LS_DB) || "null"); }catch{ return null; }
 }
 
 /* ---------------- DB normalize + MIGRACIÓN ---------------- */
@@ -413,8 +429,9 @@ function scheduleAutoPush(){
   state.pushTimer = setTimeout(()=>autoPush().catch(()=>{}), AUTO_PUSH_DEBOUNCE_MS);
   setStatus("Cambios…");
 }
-async function autoPush(){
+async function autoPush(force=false){
   if(!state.db || state.pushing) return;
+  if(!force && !state.dirty) return;
   state.pushing = true;
   try{
     setStatus("Guardando…");
@@ -428,10 +445,13 @@ async function autoPush(){
 
     bumpMeta(state.db);
     await pushLatest(state.db);
+    saveLocalDb(state.db);
 
     setDirty(false);
     setStatus("Sincronizado");
   }catch(e){
+    // guardado local para no perder cambios
+    try{ saveLocalDb(state.db); }catch{}
     const msg = String(e.message||e);
     if(msg.toLowerCase().includes("content too large") || msg.includes("413")){
       setStatus("Error: BIN demasiado grande (413). Se descartaron adjuntos base64; usá URL para comprobantes.");
@@ -452,6 +472,8 @@ function startAutoPull(){
 
       if(!state.db){
         state.db = normalizeDb(remote);
+        state.db = compactDbForRemote(state.db);
+        saveLocalDb(state.db);
         setDirty(false);
         route({ preserveFocus:false });
         setStatus("Sincronizado");
@@ -465,12 +487,16 @@ function startAutoPull(){
       // Si estás tipeando, NO rerender. Guardamos el update y lo pintamos cuando salgas del input.
       if(state.ui.lock){
         state.db = mergeDb(state.db, remote);
+        state.db = compactDbForRemote(state.db);
+        saveLocalDb(state.db);
         state.ui.pendingRender = true;
         return;
       }
 
       if(!state.dirty){
         state.db = normalizeDb(remote);
+        state.db = compactDbForRemote(state.db);
+        saveLocalDb(state.db);
         setDirty(false);
         route({ preserveFocus:false });
         setStatus("Actualizado");
@@ -478,6 +504,8 @@ function startAutoPull(){
       }
 
       state.db = mergeDb(state.db, remote);
+      state.db = compactDbForRemote(state.db);
+      saveLocalDb(state.db);
       setDirty(true);
       route({ preserveFocus:false });
       setStatus("Merge…");
@@ -492,11 +520,20 @@ async function boot(force=false){
     if(force || !state.db){
       const remote = await pullLatest();
       state.db = normalizeDb(remote);
+      state.db = compactDbForRemote(state.db);
+      saveLocalDb(state.db);
       setDirty(false);
     }
     setStatus("Sincronizado");
   }catch{
-    setStatus("Offline (usando local)");
+    const local = loadLocalDb();
+    if(local){
+      state.db = normalizeDb(local);
+      setDirty(false);
+      setStatus("Offline (usando local)");
+    }else{
+      setStatus("Offline (sin cache)");
+    }
   }finally{
     startAutoPull();
     route({ preserveFocus:false });
@@ -531,6 +568,19 @@ function matchQuery(q, ...fields){
   if(!q) return true;
   return fields.join(" ").toLowerCase().includes(q);
 }
+function renderInlinePdfField(id, label){
+  if(!INLINE_ATTACHMENTS_ENABLED){
+    return `<div class="small">Adjuntos PDF inline desactivados. Pegá una URL (Drive/Dropbox) 👌</div>`;
+  }
+  return `
+    <div>
+      <label>${label}</label>
+      <input id="${id}" type="file" accept="application/pdf"/>
+      <div class="small">Máx: ${(MAX_INLINE_PDF_BYTES/1024/1024).toFixed(1)} MB · Si pesa más: URL.</div>
+    </div>
+  `;
+}
+
 function fileToDataUrl(file){
   return new Promise((resolve,reject)=>{
     const r=new FileReader();
@@ -546,7 +596,7 @@ function ensureDb(){
   view.innerHTML = `
     <div class="card">
       <h2>Sin datos todavía</h2>
-      <p class="small">Estoy intentando cargar desde JSONBin.</p>
+      <p class="small">Estoy intentando cargar desde JSONBin. Si no hay internet, uso el último cache local.</p>
       <div class="row"><button class="btn" id="retry">Reintentar</button></div>
     </div>`;
   $("#retry").onclick = ()=>boot(true);
@@ -575,6 +625,7 @@ function route({ preserveFocus=false } = {}){
   else if(r === "docs") renderDocs();
   else renderDashboard();
 
+  updateBrand();
   if(focus) restoreFocus(focus);
 }
 window.addEventListener("hashchange", ()=>route({ preserveFocus:false }));
@@ -630,7 +681,7 @@ function renderDashboard(){
     <div class="card">
       <div class="row" style="justify-content:space-between">
         <div>
-          <h2>LA CASONA <span class="muted">- Admin.</span></h2>
+          <h2>${escapeHtml(state.db.project?.name||"Proyecto")} <span class="muted">- Admin.</span></h2>
           <div class="small">
             Inicio: ${formatDate(state.db.project?.startDate)} · Días: ${escapeHtml(state.db.project?.numDays||10)} · Moneda: ${escapeHtml(state.db.project?.currency||"ARS")}
           </div>
@@ -968,11 +1019,7 @@ function renderExpenses(){
 
       <div class="grid2">
         <div><label>Factura/Comprobante (URL)</label><input id="d_invoiceUrl" value="${escapeHtml(rec?.invoiceUrl||"")}" placeholder="https://..."/></div>
-        <div>
-          <label>Adjuntar PDF factura (opcional, chico)</label>
-          <input id="d_invoiceFile" type="file" accept="application/pdf"/>
-          <div class="small">Si pesa mucho: URL.</div>
-        </div>
+        ${renderInlinePdfField("d_invoiceFile","Adjuntar PDF factura (opcional, chico)")}
       </div>
 
       <div><label>Notas</label><textarea id="d_notes">${escapeHtml(rec?.notes||"")}</textarea></div>
@@ -1008,10 +1055,12 @@ function renderExpenses(){
         </div>
       ` : ``}
     `, async ()=>{
-      const file = $("#d_invoiceFile").files?.[0] || null;
+      const invInput = $("#d_invoiceFile");
+      const file = invInput?.files?.[0] || null;
       let invoiceDataUrl = rec?.invoiceDataUrl || "";
       if(file){
-        if(file.size > MAX_INLINE_PDF_BYTES) alert("PDF grande. Usá URL.");
+        if(!INLINE_ATTACHMENTS_ENABLED) alert("Adjuntos inline desactivados. Pegá una URL.");
+        else if(file.size > MAX_INLINE_PDF_BYTES) alert("PDF grande. Usá URL.");
         else invoiceDataUrl = await fileToDataUrl(file);
       }
 
@@ -1085,10 +1134,7 @@ function renderExpenses(){
 
       <div class="grid2">
         <div><label>Comprobante (URL)</label><input id="d_receiptUrl" placeholder="https://..." /></div>
-        <div>
-          <label>Adjuntar PDF (opcional, chico)</label>
-          <input id="d_receiptFile" type="file" accept="application/pdf"/>
-        </div>
+        ${renderInlinePdfField("d_receiptFile","Adjuntar PDF (opcional, chico)")}
       </div>
 
       <div class="small">Saldo actual: $ ${money(rem)} · Si pagás menos, queda <b>Pagado parcial</b>.</div>
@@ -1097,10 +1143,12 @@ function renderExpenses(){
       if(amt<=0) throw new Error("Monto inválido.");
       if(amt > rem + 0.0001) throw new Error("No podés pagar más que el saldo.");
 
-      const file = $("#d_receiptFile").files?.[0] || null;
+      const recInput = $("#d_receiptFile");
+      const file = recInput?.files?.[0] || null;
       let receiptDataUrl = "";
       if(file){
-        if(file.size > MAX_INLINE_PDF_BYTES) alert("PDF grande. Usá URL.");
+        if(!INLINE_ATTACHMENTS_ENABLED) alert("Adjuntos inline desactivados. Pegá una URL.");
+        else if(file.size > MAX_INLINE_PDF_BYTES) alert("PDF grande. Usá URL.");
         else receiptDataUrl = await fileToDataUrl(file);
       }
 
@@ -1211,10 +1259,7 @@ function openPaymentLineDialog(pl){
     </div>
     <div class="grid2">
       <div><label>Comprobante (URL)</label><input id="d_receiptUrl" value="${escapeHtml(pl.receiptUrl||"")}" /></div>
-      <div>
-        <label>Adjuntar PDF (opcional, chico)</label>
-        <input id="d_receiptFile" type="file" accept="application/pdf"/>
-      </div>
+      ${renderInlinePdfField("d_receiptFile","Adjuntar PDF (opcional, chico)")}
     </div>
   `, async ()=>{
     const exp = state.db.expenses.find(e=>e.id===pl.expenseId && e.deleted!==true);
@@ -1225,10 +1270,12 @@ function openPaymentLineDialog(pl){
     if(newAmt<=0) throw new Error("Monto inválido.");
     if(newAmt > max + 0.0001) throw new Error("Monto supera el saldo del gasto.");
 
-    const file = $("#d_receiptFile").files?.[0] || null;
+    const recInput = $("#d_receiptFile");
+    const file = recInput?.files?.[0] || null;
     let receiptDataUrl = pl.receiptDataUrl || "";
     if(file){
-      if(file.size > MAX_INLINE_PDF_BYTES) alert("PDF grande. Usá URL.");
+      if(!INLINE_ATTACHMENTS_ENABLED) alert("Adjuntos inline desactivados. Pegá una URL.");
+      else if(file.size > MAX_INLINE_PDF_BYTES) alert("PDF grande. Usá URL.");
       else receiptDataUrl = await fileToDataUrl(file);
     }
 
@@ -1714,7 +1761,7 @@ function renderConfig(){
 $("#btnSync").onclick = async ()=>boot(true);
 $("#btnSave").onclick = async ()=>{
   if(state.pushTimer) clearTimeout(state.pushTimer);
-  await autoPush();
+  await autoPush(true);
 };
 
 /* ---------------- Start ---------------- */
