@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 2,
+  "project": {
+    "name": "NUEVO PROYECTO",
+    "currency": "ARS",
+    "startDate": "",
+    "notes": "",
+    "theme": {
+      "accent": "#9ad3ff"
+    }
+  },
+  "catalog": {
+    "departments": [
+      "Producción",
+      "Dirección",
+      "Foto",
+      "Arte",
+      "Vestuario",
+      "Maquillaje",
+      "Sonido",
+      "Eléctrica",
+      "Grip",
+      "Post",
+      "VFX",
+      "Música"
+    ],
+    "paymentMethods": [
+      "Transferencia",
+      "Efectivo",
+      "Tarjeta",
+      "Cheque",
+      "Otro"
+    ]
+  },
+  "vendors": [],
+  "budget": [],
+  "expenses": [],
+  "costCategories": [
+    {
+      "id": "cc_default",
+      "name": "Sin categoría",
+      "order": 0,
+      "collapsedBudget": false,
+      "collapsedExpenses": false,
+      "isDefault": true,
+      "updatedAt": "",
+      "deleted": false
+    }
+  ],
+  "paymentLines": [],
+  "documents": [],
+  "_meta": {
+    "revision": 0,
+    "updatedAt": "",
+    "deviceId": ""
+  },
+  "_tombstones": {
+    "vendors": {},
+    "budget": {},
+    "expenses": {},
+    "paymentLines": {},
+    "documents": {},
+    "costCategories": {}
+  }
+}
